@@ -1,0 +1,22 @@
+{
+  "type": "tabs",
+  "items": {
+    "connection": {
+      "type": "panel",
+      "label": "MongoDB connection",
+      "items": {
+        "host": {"type": "text", "label": "Host", "default": "127.0.0.1"},
+        "port": {"type": "number", "label": "Port", "default": 27017},
+        "database": {"type": "text", "label": "Database", "default": "iobroker"},
+        "collection": {"type": "text", "label": "Collection", "default": "history"},
+        "username": {"type": "text", "label": "Username"},
+        "password": {"type": "password", "label": "Password"},
+        "enabledIds": {
+          "type": "json",
+          "label": "Enabled datapoint IDs",
+          "help": "List of datapoint IDs to record, for example [\"javascript.0.temperature\"]."
+        }
+      }
+    }
+  }
+}
