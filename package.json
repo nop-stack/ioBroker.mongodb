@@ -1,0 +1,22 @@
+{
+  "name": "iobroker.mongodb",
+  "version": "0.1.0",
+  "description": "Store ioBroker history data in MongoDB",
+  "author": "",
+  "license": "MIT",
+  "keywords": ["ioBroker", "history", "mongodb"],
+  "homepage": "https://github.com/nop-stack/ioBroker.mongodb",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nop-stack/ioBroker.mongodb.git"
+  },
+  "main": "main.js",
+  "files": ["admin/", "io-package.json", "main.js", "lib/", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@iobroker/adapter-core": "^3.4.3",
+    "mongodb": "^6.17.0"
+  }
+}
