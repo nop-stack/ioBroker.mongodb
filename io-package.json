@@ -1,0 +1,57 @@
+{
+  "common": {
+    "name": "mongodb",
+    "version": "0.1.0",
+    "title": "MongoDB History",
+    "titleLang": {
+      "en": "MongoDB History",
+      "de": "MongoDB History"
+    },
+    "desc": "Stores ioBroker history data in MongoDB",
+    "mode": "daemon",
+    "connectionType": "local",
+    "dataSource": "push",
+    "loglevel": "info",
+    "license": "MIT",
+    "messagebox": true,
+    "supportCustoms": true,
+    "protectedNative": ["password"],
+    "enabled": true,
+    "icon": "mongodb.png",
+    "news": {
+      "0.1.0": {
+        "en": "Initial development version",
+        "de": "Erste Entwicklungsversion"
+      }
+    }
+  },
+  "native": {
+    "host": "127.0.0.1",
+    "port": 27017,
+    "database": "iobroker",
+    "collection": "history",
+    "username": "",
+    "password": "",
+    "enabledIds": []
+  },
+  "objects": [
+    {
+      "_id": "info",
+      "type": "channel",
+      "common": {"name": "Information"},
+      "native": {}
+    },
+    {
+      "_id": "info.connection",
+      "type": "state",
+      "common": {
+        "name": "MongoDB connection",
+        "type": "boolean",
+        "role": "indicator.connected",
+        "read": true,
+        "write": false
+      },
+      "native": {}
+    }
+  ]
+}
