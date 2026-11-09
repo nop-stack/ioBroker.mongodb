@@ -20,7 +20,6 @@
     },
     "protectedNative": ["password"],
     "enabled": true,
-    "icon": "mongodb.png",
     "news": {
       "0.1.0": {
         "en": "Initial development version",
