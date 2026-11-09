@@ -15,6 +15,9 @@
     "license": "MIT",
     "messagebox": true,
     "supportCustoms": true,
+    "adminUI": {
+      "config": "json"
+    },
     "protectedNative": ["password"],
     "enabled": true,
     "icon": "mongodb.png",
