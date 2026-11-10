@@ -12,9 +12,9 @@
         "username": {"type": "text", "label": "Username"},
         "password": {"type": "password", "label": "Password"},
         "enabledIds": {
-          "type": "json",
+          "type": "chips",
           "label": "Enabled datapoint IDs",
-          "help": "List of datapoint IDs to record, for example [\"javascript.0.temperature\"]."
+          "help": "Enter a datapoint ID and confirm it to add it to the list."
         }
       }
     }
