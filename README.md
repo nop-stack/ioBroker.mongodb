@@ -8,7 +8,7 @@ This is an early development scaffold. It currently supports direct MongoDB conn
 
 ## Configuration
 
-Configure the MongoDB host, port, database, collection and optional credentials. `enabledIds` is currently a JSON array of datapoint IDs, for example:
+Configure the MongoDB host, port, database, collection and optional credentials. Enter each datapoint ID in the `enabledIds` field and confirm it to add it to the list. For example:
 
 ```json
 ["javascript.0.temperature", "zigbee.0.sensor.humidity"]
