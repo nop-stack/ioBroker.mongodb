@@ -11,6 +11,8 @@ class MongoDBHistory extends utils.Adapter {
         this.collection = null;
         this.enabledIds = new Set();
         this.legacyEnabledIds = new Set();
+        this.historyConfigLoaded = false;
+        this.pendingHistoryObjectChanges = new Map();
         this.on('ready', this.onReady.bind(this));
         this.on('stateChange', this.onStateChange.bind(this));
         this.on('objectChange', this.onObjectChange.bind(this));
@@ -102,6 +104,14 @@ class MongoDBHistory extends utils.Adapter {
 
     onObjectChange(id, obj) {
         if (!this.collection || typeof id !== 'string') return;
+        if (!this.historyConfigLoaded) {
+            this.pendingHistoryObjectChanges.set(id, obj);
+            return;
+        }
+        this.applyHistoryObjectChange(id, obj);
+    }
+
+    applyHistoryObjectChange(id, obj) {
         const custom = obj?.common?.custom?.[this.namespace];
         if (custom?.enabled === true || (custom == null && obj && this.legacyEnabledIds.has(id))) {
             this.enabledIds.add(id);
@@ -113,8 +123,9 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     async loadHistoryConfiguration() {
-        this.subscribeForeignObjects('*');
+        this.historyConfigLoaded = false;
         try {
+            await this.subscribeForeignObjectsAsync('*');
             const view = await new Promise((resolve, reject) => {
                 this.getObjectView('system', 'custom', {}, (error, result) => {
                     if (error) reject(error);
@@ -134,11 +145,24 @@ class MongoDBHistory extends utils.Adapter {
             for (const id of this.legacyEnabledIds) {
                 if (!objectConfig.has(id)) enabled.add(id);
             }
+            for (const [id, obj] of this.pendingHistoryObjectChanges) {
+                const settings = obj?.common?.custom?.[this.namespace];
+                if (settings?.enabled === true || (settings == null && obj && this.legacyEnabledIds.has(id))) {
+                    enabled.add(id);
+                } else {
+                    enabled.delete(id);
+                }
+            }
+            this.pendingHistoryObjectChanges.clear();
             this.enabledIds = enabled;
+            this.historyConfigLoaded = true;
             if (enabled.size) this.subscribeForeignStates([...enabled]);
             this.log.info(`History logging enabled for ${enabled.size} datapoint(s)`);
         } catch (error) {
+            this.historyConfigLoaded = true;
             this.log.warn(`Could not load datapoint history settings: ${error.message}`);
+            for (const [id, obj] of this.pendingHistoryObjectChanges) this.applyHistoryObjectChange(id, obj);
+            this.pendingHistoryObjectChanges.clear();
             if (this.enabledIds.size) this.subscribeForeignStates([...this.enabledIds]);
         }
     }
