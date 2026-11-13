@@ -18,7 +18,7 @@
     "adminUI": {
       "config": "json"
     },
-    "protectedNative": ["password"],
+    "protectedNative": ["connectionString", "password"],
     "enabled": true,
     "news": {
       "0.1.0": {
@@ -28,6 +28,7 @@
     }
   },
   "native": {
+    "connectionString": "mongodb://127.0.0.1:27017/iobroker",
     "host": "127.0.0.1",
     "port": 27017,
     "database": "iobroker",
