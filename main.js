@@ -2,6 +2,7 @@
 
 const utils = require('@iobroker/adapter-core');
 const { MongoClient } = require('mongodb');
+const { sendResponse } = require('@iobroker/aggregate');
 
 class MongoDBHistory extends utils.Adapter {
     constructor(options = {}) {
@@ -110,10 +111,18 @@ class MongoDBHistory extends utils.Adapter {
     async onMessage(obj) {
         if (!obj || !obj.callback) return;
         let result;
+        let responseSent = false;
         try {
             switch (obj.command) {
+                case 'features':
+                    result = { supportedFeatures: ['update', 'delete', 'deleteRange', 'deleteAll', 'storeState'] };
+                    break;
                 case 'getHistory':
-                    result = await this.getHistory(obj.message || {});
+                    result = await this.getHistory(obj, obj.message || {});
+                    responseSent = true;
+                    break;
+                case 'getRawEntries':
+                    result = await this.getRawEntries(obj.message || {});
                     break;
                 case 'storeState':
                     result = await this.storeState(obj.message);
@@ -136,22 +145,102 @@ class MongoDBHistory extends utils.Adapter {
         } catch (error) {
             result = { error: error.message };
         }
-        this.sendTo(obj.from, obj.command, result, obj.callback);
+        if (!responseSent) this.sendTo(obj.from, obj.command, result, obj.callback);
     }
 
-    async getHistory(message) {
-        if (!message.id) throw new Error('id is required');
+    async getHistory(obj, message) {
+        const input = message.options && typeof message.options === 'object' ? message.options : message;
+        const id = message.id || input.id;
+        if (!id) throw new Error('id is required');
+
+        const end = input.end == null ? Date.now() + 5000000 : this.toTimestamp(input.end);
+        const start = input.start == null ? undefined : this.toTimestamp(input.start);
+        if (start !== undefined && start > end) throw new Error('start must be before end');
+
+        const aggregate = input.aggregate || 'average';
+        const requestedLimit = this.toPositiveInteger(input.limit, 2000, 2000);
+        const limit = requestedLimit || 2000;
+        const requestedCount = this.toPositiveInteger(
+            input.count === true ? undefined : input.count,
+            aggregate === 'none' || aggregate === 'onchange' ? limit : 500,
+            2000
+        );
+        const count = requestedCount || (aggregate === 'none' || aggregate === 'onchange' ? limit : 500);
+        const effectiveStart = start === undefined ? end - 86400000 : start;
+        const returnNewestEntries = Boolean(input.returnNewestEntries) || (start === undefined && input.count != null);
+        const options = {
+            id,
+            start: start === undefined && returnNewestEntries && (aggregate === 'none' || aggregate === 'onchange')
+                ? undefined
+                : effectiveStart,
+            end,
+            count,
+            limit,
+            step: this.toPositiveInteger(input.step, undefined),
+            aggregate,
+            ignoreNull: input.ignoreNull === true || input.ignoreNull === 'true'
+                ? true
+                : input.ignoreNull === 0 || input.ignoreNull === '0'
+                    ? 0
+                    : false,
+            from: Boolean(input.from),
+            q: Boolean(input.q),
+            ack: Boolean(input.ack),
+            addId: Boolean(input.addId),
+            returnNewestEntries,
+            sessionId: input.sessionId,
+            percentile: Number.isFinite(Number(input.percentile)) ? Number(input.percentile) : undefined,
+            quantile: Number.isFinite(Number(input.quantile)) ? Number(input.quantile) : undefined,
+            integralUnit: Number.isFinite(Number(input.integralUnit)) ? Number(input.integralUnit) : undefined,
+            integralInterpolation: input.integralInterpolation || undefined,
+            removeBorderValues: Boolean(input.removeBorderValues)
+        };
+
+        const query = {};
+        if (id !== '*') query.id = id;
+        query.ts = { $lte: end };
+        if (!(start === undefined && returnNewestEntries && (aggregate === 'none' || aggregate === 'onchange'))) {
+            query.ts.$gte = effectiveStart;
+        }
+
+        let cursor = this.collection.find(query).sort({ ts: 1 });
+        if (options.returnNewestEntries && start === undefined) {
+            cursor = this.collection.find(query).sort({ ts: -1 }).limit(limit);
+        } else if (aggregate === 'none' || aggregate === 'onchange') {
+            cursor = cursor.limit(limit);
+        }
+        const rows = await cursor.toArray();
+        if (options.returnNewestEntries && start === undefined) rows.reverse();
+        const data = rows.map(({ id: rowId, ts, val, ack, q, from }) => ({
+            id: rowId,
+            ts,
+            val,
+            ack: Boolean(ack),
+            q: Number.isFinite(q) ? q : 0,
+            from: from || undefined
+        }));
+        sendResponse(this, obj, id, options, data, Date.now());
+    }
+
+    async getRawEntries(message) {
+        if (!message || typeof message.id !== 'string' || !message.id) throw new Error('id is required');
         const query = { id: message.id };
         if (message.start != null || message.end != null) {
             query.ts = {};
             if (message.start != null) query.ts.$gte = this.toTimestamp(message.start);
             if (message.end != null) query.ts.$lte = this.toTimestamp(message.end);
         }
-        const result = await this.collection.find(query).sort({ ts: 1 }).toArray();
-        return {
-            result: result.map(({ ts, val, ack, q, from }) => ({ ts, val, ack, q, from })),
-            step: 0
-        };
+        const limit = this.toPositiveInteger(message.limit, 100, 5000) || 100;
+        const offset = this.toPositiveInteger(message.offset, 0, Number.MAX_SAFE_INTEGER);
+        const sort = message.sort === 'asc' ? 1 : -1;
+        const total = message.noTotal ? undefined : await this.collection.countDocuments(query);
+        const result = await this.collection.find(query)
+            .sort({ ts: sort })
+            .skip(offset)
+            .limit(limit)
+            .project({ _id: 0, id: 1, ts: 1, val: 1 })
+            .toArray();
+        return { result, total };
     }
 
     async storeState(message) {
@@ -235,9 +324,20 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     toTimestamp(value) {
-        const timestamp = typeof value === 'number' ? value : new Date(value).getTime();
+        const timestamp = typeof value === 'number'
+            ? value
+            : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
+                ? Number(value)
+                : new Date(value).getTime();
         if (!Number.isFinite(timestamp)) throw new Error('Invalid timestamp');
         return timestamp;
+    }
+
+    toPositiveInteger(value, fallback, maximum = Number.MAX_SAFE_INTEGER) {
+        if (value == null || value === '') return fallback;
+        const integer = Number(value);
+        if (!Number.isInteger(integer) || integer < 0) throw new Error('Expected a non-negative integer');
+        return Math.min(integer, maximum);
     }
 
     async onUnload(callback) {
