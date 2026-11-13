@@ -11,6 +11,7 @@
     "mode": "daemon",
     "connectionType": "local",
     "dataSource": "push",
+    "getHistory": true,
     "loglevel": "info",
     "license": "MIT",
     "messagebox": true,
@@ -35,8 +36,7 @@
     "database": "iobroker",
     "collection": "history",
     "username": "",
-    "password": "",
-    "enabledIds": []
+    "password": ""
   },
   "objects": [
     {
