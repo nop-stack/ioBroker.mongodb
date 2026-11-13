@@ -38,19 +38,30 @@ class MongoDBHistory extends utils.Adapter {
         await this.setStateAsync('info.connection', false, true);
 
         try {
-            const auth = this.config.username
-                ? `${encodeURIComponent(this.config.username)}:${encodeURIComponent(this.config.password || '')}@`
-                : '';
+            const configuredUri = String(this.config.connectionString || '').trim();
             const host = String(this.config.host || '127.0.0.1').trim();
             const port = Number(this.config.port) || 27017;
-            const database = this.config.database || 'iobroker';
-            const isConnectionString = /^mongodb(?:\+srv)?:\/\//i.test(host);
-            const isAtlasHost = host.toLowerCase().endsWith('.mongodb.net');
-            const uri = isConnectionString
-                ? host
-                : isAtlasHost
-                    ? `mongodb+srv://${auth}${host}/${encodeURIComponent(database)}`
-                    : `mongodb://${auth}${host}:${port}/${encodeURIComponent(database)}`;
+            let uri;
+            let database;
+
+            if (configuredUri) {
+                if (!/^mongodb(?:\+srv)?:\/\//i.test(configuredUri)) {
+                    throw new Error('Connection string must start with mongodb:// or mongodb+srv://');
+                }
+                uri = configuredUri;
+                const parsedUri = new URL(configuredUri);
+                database = decodeURIComponent(parsedUri.pathname.replace(/^\/+/, '').split('/')[0] || '') || 'iobroker';
+            } else {
+                const auth = this.config.username
+                    ? `${encodeURIComponent(this.config.username)}:${encodeURIComponent(this.config.password || '')}@`
+                    : '';
+                const legacyDatabase = this.config.database || 'iobroker';
+                const isAtlasHost = host.toLowerCase().endsWith('.mongodb.net');
+                uri = isAtlasHost
+                    ? `mongodb+srv://${auth}${host}/${encodeURIComponent(legacyDatabase)}`
+                    : `mongodb://${auth}${host}:${port}/${encodeURIComponent(legacyDatabase)}`;
+                database = legacyDatabase;
+            }
             this.client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
             await this.client.connect();
             const db = this.client.db(database);
@@ -58,11 +69,7 @@ class MongoDBHistory extends utils.Adapter {
             await this.collection.createIndex({ id: 1, ts: 1 });
             await this.setStateAsync('info.connection', true, true);
             this.subscribeForeignStates('*');
-            const target = isConnectionString
-                ? 'configured connection string'
-                : isAtlasHost
-                    ? `Atlas ${host}`
-                    : `${host}:${port}/${database}`;
+            const target = configuredUri ? 'configured connection string' : `${host}:${port}/${database}`;
             this.log.info(`Connected to MongoDB ${target}`);
         } catch (error) {
             await this.setStateAsync('info.connection', false, true);
