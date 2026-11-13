@@ -8,9 +8,13 @@ This is an early development scaffold. It currently supports direct MongoDB conn
 
 ## Configuration
 
-Configure the MongoDB host, port, database, collection and optional credentials. For MongoDB Atlas, enter only the cluster hostname in Host, such as `iobroker-data.s8yl5.mongodb.net`; the adapter selects `mongodb+srv://` automatically and uses the SRV/TLS settings provided by MongoDB. Enter the Atlas database user's username and password in their separate fields. The Port setting is ignored for Atlas. A complete `mongodb://` or `mongodb+srv://` connection string can also be entered in Host.
+Configure the complete MongoDB connection string and collection. For MongoDB Atlas, use a URI such as:
 
-For a local or non-SRV MongoDB server, enter its hostname and port as usual. Enter each datapoint ID in the `enabledIds` field and confirm it to add it to the list. For example:
+```text
+mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker
+```
+
+For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernames and passwords containing reserved URI characters must be percent-encoded. The connection string is stored as a protected native setting. Enter each datapoint ID in the `enabledIds` field and confirm it to add it to the list. For example:
 
 ```json
 ["javascript.0.temperature", "zigbee.0.sensor.humidity"]
