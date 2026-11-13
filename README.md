@@ -4,7 +4,7 @@ An ioBroker history adapter that stores datapoint values in an external MongoDB 
 
 ## Development status
 
-This is an early development scaffold. It currently supports direct MongoDB connection, recording configured datapoint IDs, and an initial subset of the history message interface. It is not yet a drop-in replacement for `ioBroker.sql`: chart aggregation, retention, buffering/retry handling, adapter-admin datapoint selection, and the full history API still need to be implemented.
+The adapter records state changes for configured datapoint IDs and supports the core history message interface, including aggregated `getHistory` queries and paginated raw reads. It is not yet a drop-in replacement for `ioBroker.sql`: retention, buffering/retry handling, adapter-admin datapoint selection, and the full history API still need to be implemented.
 
 ## Configuration
 
@@ -14,7 +14,7 @@ Configure the complete MongoDB connection string and collection. For MongoDB Atl
 mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker
 ```
 
-For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernames and passwords containing reserved URI characters must be percent-encoded. The connection string is stored as a protected native setting. Enter each datapoint ID in the `enabledIds` field and confirm it to add it to the list. For example:
+For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernames and passwords containing reserved URI characters must be percent-encoded. The connection string is stored encrypted but remains readable in the configuration field. Enter each datapoint ID in the `enabledIds` field and confirm it to add it to the list. For example:
 
 ```json
 ["javascript.0.temperature", "zigbee.0.sensor.humidity"]
@@ -33,9 +33,10 @@ The adapter creates a compound `{ id: 1, ts: 1 }` index and stores documents wit
 }
 ```
 
-## Message interface in this first version
+## History messages
 
-- `getHistory`: returns stored values for one datapoint and optional `start` / `end` bounds.
+- `getHistory`: reads a datapoint's history using the standard `{id, options}` message format and shared ioBroker aggregation.
+- `getRawEntries`: returns stored rows for one datapoint with range, sorting, and pagination options.
 - `storeState`: writes one or more supplied values.
 - `delete`, `deleteAll`, `deleteRange`: deletes matching history documents.
 
