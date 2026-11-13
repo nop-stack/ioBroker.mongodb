@@ -4,7 +4,7 @@ An ioBroker history adapter that stores datapoint values in an external MongoDB 
 
 ## Development status
 
-The adapter records state changes for configured datapoint IDs and supports the core history message interface, including aggregated `getHistory` queries and paginated raw reads. It is not yet a drop-in replacement for `ioBroker.sql`: retention, buffering/retry handling, adapter-admin datapoint selection, and the full history API still need to be implemented.
+The adapter records state changes for datapoints with MongoDB history enabled in their ioBroker object settings. It supports the core history message interface, including aggregated `getHistory` queries and paginated raw reads. It is not yet a drop-in replacement for `ioBroker.sql`: retention, buffering/retry handling, per-datapoint logging options, and the full history API still need to be implemented.
 
 ## Configuration
 
@@ -14,11 +14,9 @@ Configure the complete MongoDB connection string and collection. For MongoDB Atl
 mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker
 ```
 
-For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernames and passwords containing reserved URI characters must be percent-encoded. The connection string is stored encrypted but remains readable in the configuration field. Enter each datapoint ID in the `enabledIds` field and confirm it to add it to the list. For example:
+For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernames and passwords containing reserved URI characters must be percent-encoded. The connection string is stored encrypted but remains readable in the configuration field.
 
-```json
-["javascript.0.temperature", "zigbee.0.sensor.humidity"]
-```
+Enable logging on each datapoint in Admin's object settings under **History** and select this MongoDB instance. The adapter then records its future state changes automatically; it does not import old values from another history adapter.
 
 The adapter creates a compound `{ id: 1, ts: 1 }` index and stores documents with this shape:
 
