@@ -5,17 +5,13 @@
       "type": "panel",
       "label": "MongoDB connection",
       "items": {
-        "host": {
-          "type": "text",
-          "label": "Host or Atlas cluster hostname",
-          "default": "127.0.0.1",
-          "help": "For MongoDB Atlas, enter only the cluster hostname, for example iobroker-data.s8yl5.mongodb.net. The adapter uses SRV and TLS automatically; enter the database username and password below."
+        "connectionString": {
+          "type": "password",
+          "label": "MongoDB connection string",
+          "default": "mongodb://127.0.0.1:27017/iobroker",
+          "help": "Paste the complete MongoDB URI. Atlas example: mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker. Encode reserved URI characters in usernames and passwords."
         },
-        "port": {"type": "number", "label": "Port", "default": 27017},
-        "database": {"type": "text", "label": "Database", "default": "iobroker"},
         "collection": {"type": "text", "label": "Collection", "default": "history"},
-        "username": {"type": "text", "label": "Username"},
-        "password": {"type": "password", "label": "Password"},
         "enabledIds": {
           "type": "chips",
           "label": "Enabled datapoint IDs",
