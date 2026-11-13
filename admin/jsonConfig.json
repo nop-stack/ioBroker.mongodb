@@ -11,12 +11,7 @@
           "default": "mongodb://127.0.0.1:27017/iobroker",
           "help": "Paste the complete MongoDB URI. Atlas example: mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker. Encode reserved URI characters in usernames and passwords."
         },
-        "collection": {"type": "text", "label": "Collection", "default": "history"},
-        "enabledIds": {
-          "type": "chips",
-          "label": "Enabled datapoint IDs",
-          "help": "Enter a datapoint ID and confirm it to add it to the list."
-        }
+        "collection": {"type": "text", "label": "Collection", "default": "history"}
       }
     }
   }
