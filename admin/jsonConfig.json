@@ -6,7 +6,7 @@
       "label": "MongoDB connection",
       "items": {
         "connectionString": {
-          "type": "password",
+          "type": "text",
           "label": "MongoDB connection string",
           "default": "mongodb://127.0.0.1:27017/iobroker",
           "help": "Paste the complete MongoDB URI. Atlas example: mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker. Encode reserved URI characters in usernames and passwords."
