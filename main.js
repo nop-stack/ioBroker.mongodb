@@ -19,14 +19,38 @@ class MongoDBHistory extends utils.Adapter {
         const ids = Array.isArray(this.config.enabledIds) ? this.config.enabledIds : [];
         this.enabledIds = new Set(ids.filter(id => typeof id === 'string' && id.trim()).map(id => id.trim()));
 
+        await this.setObjectNotExistsAsync('info', {
+            type: 'channel',
+            common: { name: 'Information' },
+            native: {}
+        });
+        await this.setObjectNotExistsAsync('info.connection', {
+            type: 'state',
+            common: {
+                name: 'MongoDB connection',
+                type: 'boolean',
+                role: 'indicator.connected',
+                read: true,
+                write: false
+            },
+            native: {}
+        });
+        await this.setStateAsync('info.connection', false, true);
+
         try {
             const auth = this.config.username
                 ? `${encodeURIComponent(this.config.username)}:${encodeURIComponent(this.config.password || '')}@`
                 : '';
-            const host = this.config.host || '127.0.0.1';
+            const host = String(this.config.host || '127.0.0.1').trim();
             const port = Number(this.config.port) || 27017;
             const database = this.config.database || 'iobroker';
-            const uri = `mongodb://${auth}${host}:${port}/${encodeURIComponent(database)}`;
+            const isConnectionString = /^mongodb(?:\+srv)?:\/\//i.test(host);
+            const isAtlasHost = host.toLowerCase().endsWith('.mongodb.net');
+            const uri = isConnectionString
+                ? host
+                : isAtlasHost
+                    ? `mongodb+srv://${auth}${host}/${encodeURIComponent(database)}`
+                    : `mongodb://${auth}${host}:${port}/${encodeURIComponent(database)}`;
             this.client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
             await this.client.connect();
             const db = this.client.db(database);
@@ -34,7 +58,12 @@ class MongoDBHistory extends utils.Adapter {
             await this.collection.createIndex({ id: 1, ts: 1 });
             await this.setStateAsync('info.connection', true, true);
             this.subscribeForeignStates('*');
-            this.log.info(`Connected to MongoDB ${host}:${port}/${database}`);
+            const target = isConnectionString
+                ? 'configured connection string'
+                : isAtlasHost
+                    ? `Atlas ${host}`
+                    : `${host}:${port}/${database}`;
+            this.log.info(`Connected to MongoDB ${target}`);
         } catch (error) {
             await this.setStateAsync('info.connection', false, true);
             this.log.error(`MongoDB connection failed: ${error.message}`);
