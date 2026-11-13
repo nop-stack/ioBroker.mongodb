@@ -18,7 +18,8 @@
     "adminUI": {
       "config": "json"
     },
-    "protectedNative": ["connectionString", "password"],
+    "encryptedNative": ["connectionString"],
+    "protectedNative": ["password"],
     "enabled": true,
     "news": {
       "0.1.0": {
