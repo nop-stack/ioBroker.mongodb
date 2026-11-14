@@ -33,7 +33,7 @@ The adapter creates a compound `{ id: 1, ts: 1 }` index and stores documents wit
 
 ### Aggregation pipeline
 
-The **Aggregation pipeline** tab accepts a MongoDB aggregation pipeline as a JSON array. The adapter checks JSON syntax, stage names, and field references against the input fields `_id`, `id`, `ts`, `val`, `ack`, `q`, and `from`. It also checks that `_id` remains available for the mapped output. Pipeline validation messages appear in the adapter log when it starts.
+The **Aggregation pipeline** tab accepts a MongoDB aggregation pipeline as a JSON array. The adapter checks JSON syntax, stage names, and field references against the input fields `_id`, `id`, `ts`, `val`, `ack`, `q`, and `from`. It also checks that `_id` remains available for the mapped output. Pipeline validation messages appear in the adapter log when it starts. A datapoint's optional `aliasId` from its **History** custom settings replaces `id` in the aggregation input; use `$id` to map it into the output. An empty alias leaves the original ioBroker ID in `id`.
 
 For each accepted history record, MongoDB runs the configured pipeline against that record and writes the result to the separate `history_mapped` collection by default. The regular history collection keeps the original ioBroker fields, so `getHistory` continues to work. For example, this maps a record to a time-series document:
 
@@ -42,7 +42,7 @@ For each accepted history record, MongoDB runs the configured pipeline against t
   {
     "$project": {
       "_id": 1,
-      "source": { "$literal": "outdoor-temp" },
+      "source": "$id",
       "@timestamp": { "$toDate": "$ts" },
       "@version": { "$literal": "1" },
       "val": 1
