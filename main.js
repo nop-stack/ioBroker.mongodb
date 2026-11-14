@@ -12,6 +12,9 @@ class MongoDBHistory extends utils.Adapter {
         this.customs = Object.create(null);
         this.lastValues = new Map();
         this.debounceTimers = new Map();
+        this.lastLoggedAt = new Map();
+        this.aggregationPipeline = [];
+        this.aggregationCollection = null;
         this.historyConfigLoaded = false;
         this.pendingHistoryObjectChanges = new Map();
         this.on('ready', this.onReady.bind(this));
@@ -39,6 +42,7 @@ class MongoDBHistory extends utils.Adapter {
             native: {}
         });
         await this.setStateAsync('info.connection', false, true);
+        this.configureAggregationPipeline();
 
         try {
             const configuredUri = String(this.config.connectionString || '').trim();
@@ -69,6 +73,11 @@ class MongoDBHistory extends utils.Adapter {
             await this.client.connect();
             const db = this.client.db(database);
             this.collection = db.collection(this.config.collection || 'history');
+            this.aggregationCollection = String(this.config.aggregationCollection || 'history_mapped').trim();
+            if (this.aggregationPipeline.length && this.aggregationCollection === this.collection.collectionName) {
+                this.log.error('Mapped output collection must differ from the history collection; mapped output is disabled');
+                this.aggregationPipeline = [];
+            }
             await this.collection.createIndex({ id: 1, ts: 1 });
             await this.setStateAsync('info.connection', true, true);
             await this.loadHistoryConfiguration();
@@ -94,18 +103,40 @@ class MongoDBHistory extends utils.Adapter {
         if (!state || !this.collection) return;
         const config = this.customs[id];
         if (!config) return;
-        if (config.changesOnly !== false && this.lastValues.has(id) && Object.is(this.lastValues.get(id), state.val)) {
-            return;
-        }
-        const debounce = Number.isFinite(Number(config.debounce)) ? Math.max(0, Number(config.debounce)) : 0;
+        const debounce = this.getNonNegativeNumber(config.debounceTime ?? config.debounce, 0);
         if (debounce > 0) {
             const oldTimer = this.debounceTimers.get(id);
             if (oldTimer) this.clearTimeout(oldTimer);
             this.debounceTimers.set(id, this.setTimeout(() => {
                 this.debounceTimers.delete(id);
-                this.writeState(id, state);
+                this.writeStateIfAllowed(id, state);
             }, debounce));
             return;
+        }
+        await this.writeStateIfAllowed(id, state);
+    }
+
+    async writeStateIfAllowed(id, state) {
+        const config = this.customs[id];
+        if (!config || !this.collection) return;
+        if (config.ignoreZero === true && (state.val === 0 || state.val === null)) return;
+
+        const now = Date.now();
+        const lastValue = this.lastValues.get(id);
+        const lastLoggedAt = this.lastLoggedAt.get(id);
+        const blockTime = this.getNonNegativeNumber(config.blockTime, 0);
+        if (lastLoggedAt && blockTime > 0 && now - lastLoggedAt < blockTime) return;
+
+        if (config.changesOnly !== false && lastValue !== undefined) {
+            if (Object.is(lastValue, state.val)) {
+                const relogSeconds = this.getNonNegativeNumber(config.changesRelogInterval, 0);
+                if (!relogSeconds || !lastLoggedAt || now - lastLoggedAt < relogSeconds * 1000) return;
+            } else {
+                const minDelta = this.getNonNegativeNumber(config.changesMinDelta, 0);
+                if (minDelta > 0 && typeof lastValue === 'number' && typeof state.val === 'number'
+                    && Number.isFinite(lastValue) && Number.isFinite(state.val)
+                    && Math.abs(state.val - lastValue) < minDelta) return;
+            }
         }
         await this.writeState(id, state);
     }
@@ -113,8 +144,10 @@ class MongoDBHistory extends utils.Adapter {
     async writeState(id, state) {
         if (!this.collection || !this.customs[id]) return;
         try {
-            await this.collection.insertOne(this.toDocument(id, state));
+            const result = await this.collection.insertOne(this.toDocument(id, state));
+            await this.writeMappedDocument(result.insertedId);
             this.lastValues.set(id, state.val);
+            this.lastLoggedAt.set(id, Date.now());
         } catch (error) {
             this.log.warn(`Could not store history for ${id}: ${error.message}`);
         }
@@ -193,6 +226,26 @@ class MongoDBHistory extends utils.Adapter {
             q: Number.isFinite(state.q) ? state.q : 0,
             from: state.from || null
         };
+    }
+
+    async writeMappedDocument(documentId) {
+        if (!this.aggregationPipeline.length || !this.collection || !this.aggregationCollection) return;
+        try {
+            await this.collection.aggregate([
+                { $match: { _id: documentId } },
+                ...this.aggregationPipeline,
+                {
+                    $merge: {
+                        into: this.aggregationCollection,
+                        on: '_id',
+                        whenMatched: 'replace',
+                        whenNotMatched: 'insert'
+                    }
+                }
+            ]).toArray();
+        } catch (error) {
+            this.log.warn(`Could not write mapped MongoDB document ${documentId}: ${error.message}`);
+        }
     }
 
     async onMessage(obj) {
@@ -380,7 +433,8 @@ class MongoDBHistory extends utils.Adapter {
                     continue;
                 }
                 try {
-                    await this.collection.insertOne(this.toDocument(entry.id, { ...state, ts: Number(state.ts) }));
+                    const result = await this.collection.insertOne(this.toDocument(entry.id, { ...state, ts: Number(state.ts) }));
+                    await this.writeMappedDocument(result.insertedId);
                     successCount++;
                 } catch (error) {
                     errors.push(`${entry.id}: ${error.message}`);
@@ -459,6 +513,143 @@ class MongoDBHistory extends utils.Adapter {
         const integer = Number(value);
         if (!Number.isInteger(integer) || integer < 0) throw new Error('Expected a non-negative integer');
         return Math.min(integer, maximum);
+    }
+
+    getNonNegativeNumber(value, fallback) {
+        if (value == null || value === '') return fallback;
+        const number = Number(value);
+        return Number.isFinite(number) && number >= 0 ? number : fallback;
+    }
+
+    configureAggregationPipeline() {
+        this.aggregationPipeline = [];
+        const source = this.config.aggregationPipeline;
+        if (source == null || source === '') return;
+        let pipeline;
+        try {
+            pipeline = typeof source === 'string' ? JSON.parse(source) : source;
+        } catch (error) {
+            this.log.warn(`Aggregation pipeline is not valid JSON: ${error.message}`);
+            return;
+        }
+        if (!Array.isArray(pipeline)) {
+            this.log.warn('Aggregation pipeline must be a JSON array of stages');
+            return;
+        }
+
+        const issues = this.validateAggregationPipeline(pipeline);
+        if (issues.length) {
+            for (const issue of issues) this.log.warn(`Aggregation pipeline: ${issue}`);
+        } else {
+            this.aggregationPipeline = pipeline;
+            this.log.info(`Aggregation pipeline is valid (${pipeline.length} stage(s)); source fields: _id, id, ts, val, ack, q, from`);
+        }
+    }
+
+    validateAggregationPipeline(pipeline) {
+        const issues = [];
+        const fields = new Set(['_id', 'id', 'ts', 'val', 'ack', 'q', 'from']);
+        // These stages keep the pipeline one-to-one: a source document can produce at most one mapped document.
+        const supportedStages = new Set(['$addFields', '$set', '$match', '$project', '$unset']);
+        const hasField = path => {
+            const fieldPath = String(path);
+            return fields.has(fieldPath) || fieldPath.startsWith('val.');
+        };
+        const checkExpression = (value, stageIndex, path = '') => {
+            if (typeof value === 'string') {
+                if (value.startsWith('$') && !value.startsWith('$$')) {
+                    const field = value.slice(1).split('.')[0].split('[')[0];
+                    if (field && !hasField(value.slice(1))) {
+                        issues.push(`stage ${stageIndex + 1} references unknown field "${value.slice(1)}"${path ? ` at ${path}` : ''}`);
+                    }
+                }
+                return;
+            }
+            if (Array.isArray(value)) {
+                value.forEach((entry, index) => checkExpression(entry, stageIndex, `${path}[${index}]`));
+                return;
+            }
+            if (!value || typeof value !== 'object') return;
+            for (const [key, entry] of Object.entries(value)) {
+                if (key === '$literal') continue;
+                checkExpression(entry, stageIndex, path ? `${path}.${key}` : key);
+            }
+        };
+
+        for (let index = 0; index < pipeline.length; index++) {
+            const stage = pipeline[index];
+            if (!stage || typeof stage !== 'object' || Array.isArray(stage) || Object.keys(stage).length !== 1) {
+                issues.push(`stage ${index + 1} must be an object with exactly one operator`);
+                continue;
+            }
+            const [operator, specification] = Object.entries(stage)[0];
+            if (!operator.startsWith('$')) issues.push(`stage ${index + 1} has invalid operator "${operator}"`);
+            else if (!supportedStages.has(operator)) {
+                issues.push(`stage ${index + 1} uses unsupported operator "${operator}"; mapped pipelines must preserve one output document per input`);
+            }
+
+            if (operator === '$match' && specification && typeof specification === 'object') {
+                const checkMatchKeys = (query, prefix = '') => {
+                    if (!query || typeof query !== 'object' || Array.isArray(query)) return;
+                    for (const [key, value] of Object.entries(query)) {
+                        if (key.startsWith('$')) {
+                            if (key === '$and' || key === '$or' || key === '$nor') checkMatchKeys(value, prefix);
+                            else checkExpression(value, index, `${prefix}${key}`);
+                            continue;
+                        }
+                        const fieldPath = prefix ? `${prefix}.${key}` : key;
+                        if (!hasField(fieldPath)) issues.push(`stage ${index + 1} matches unknown field "${fieldPath}"`);
+                        if (value && typeof value === 'object' && !Array.isArray(value)) checkMatchKeys(value, fieldPath);
+                        else checkExpression(value, index, fieldPath);
+                    }
+                };
+                checkMatchKeys(specification);
+            } else if (operator === '$sort' && specification && typeof specification === 'object') {
+                for (const field of Object.keys(specification)) {
+                    if (!hasField(field)) issues.push(`stage ${index + 1} sorts by unknown field "${field}"`);
+                }
+            } else {
+                checkExpression(specification, index, operator);
+            }
+
+            if (operator === '$project' && specification && typeof specification === 'object') {
+                const nextFields = new Set();
+                for (const [field, expression] of Object.entries(specification)) {
+                    if (field === '_id' && expression !== 1 && expression !== true) {
+                        issues.push(`stage ${index + 1} must preserve the original _id with "_id": 1`);
+                    }
+                    if (expression === 1 || expression === true) {
+                        if (hasField(field)) nextFields.add(field);
+                        else issues.push(`stage ${index + 1} includes unknown field "${field}"`);
+                    } else if (expression !== 0 && expression !== false) {
+                        nextFields.add(field);
+                    } else if (field === '_id' && expression !== 0 && fields.has('_id')) {
+                        nextFields.add('_id');
+                    }
+                }
+                if (!Object.prototype.hasOwnProperty.call(specification, '_id') || specification._id !== 0) nextFields.add('_id');
+                fields.clear();
+                for (const field of nextFields) fields.add(field);
+            } else if ((operator === '$set' || operator === '$addFields') && specification && typeof specification === 'object') {
+                if (Object.prototype.hasOwnProperty.call(specification, '_id')) {
+                    issues.push(`stage ${index + 1} must not overwrite _id`);
+                }
+                for (const field of Object.keys(specification)) fields.add(field);
+            } else if (operator === '$unset') {
+                const unsetFields = Array.isArray(specification) ? specification : [specification];
+                if (!unsetFields.every(field => typeof field === 'string')) {
+                    issues.push(`stage ${index + 1} $unset must contain a field name or an array of field names`);
+                }
+                for (const field of unsetFields) {
+                    if (typeof field !== 'string') continue;
+                    if (field === '_id') issues.push(`stage ${index + 1} must not remove _id`);
+                    if (!hasField(field)) issues.push(`stage ${index + 1} removes unknown field "${field}"`);
+                    fields.delete(field);
+                }
+            }
+        }
+        if (!fields.has('_id')) issues.push('pipeline output removes _id; _id is required for mapped documents');
+        return [...new Set(issues)];
     }
 
     async onUnload(callback) {
