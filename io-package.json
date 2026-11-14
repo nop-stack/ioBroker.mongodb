@@ -37,6 +37,8 @@
     "port": 27017,
     "database": "iobroker",
     "collection": "history",
+    "aggregationPipeline": "[]",
+    "aggregationCollection": "history_mapped",
     "username": "",
     "password": ""
   },
