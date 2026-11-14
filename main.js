@@ -145,7 +145,7 @@ class MongoDBHistory extends utils.Adapter {
         if (!this.collection || !this.customs[id]) return;
         try {
             const result = await this.collection.insertOne(this.toDocument(id, state));
-            await this.writeMappedDocument(result.insertedId);
+            await this.writeMappedDocument(result.insertedId, this.customs[id].aliasId);
             this.lastValues.set(id, state.val);
             this.lastLoggedAt.set(id, Date.now());
         } catch (error) {
@@ -228,11 +228,13 @@ class MongoDBHistory extends utils.Adapter {
         };
     }
 
-    async writeMappedDocument(documentId) {
+    async writeMappedDocument(documentId, aliasId) {
         if (!this.aggregationPipeline.length || !this.collection || !this.aggregationCollection) return;
         try {
-            await this.collection.aggregate([
-                { $match: { _id: documentId } },
+            const pipeline = [{ $match: { _id: documentId } }];
+            const alias = typeof aliasId === 'string' ? aliasId.trim() : '';
+            if (alias) pipeline.push({ $set: { id: { $literal: alias } } });
+            pipeline.push(
                 ...this.aggregationPipeline,
                 {
                     $merge: {
@@ -242,7 +244,8 @@ class MongoDBHistory extends utils.Adapter {
                         whenNotMatched: 'insert'
                     }
                 }
-            ]).toArray();
+            );
+            await this.collection.aggregate(pipeline).toArray();
         } catch (error) {
             this.log.warn(`Could not write mapped MongoDB document ${documentId}: ${error.message}`);
         }
@@ -434,7 +437,7 @@ class MongoDBHistory extends utils.Adapter {
                 }
                 try {
                     const result = await this.collection.insertOne(this.toDocument(entry.id, { ...state, ts: Number(state.ts) }));
-                    await this.writeMappedDocument(result.insertedId);
+                    await this.writeMappedDocument(result.insertedId, this.customs[entry.id]?.aliasId);
                     successCount++;
                 } catch (error) {
                     errors.push(`${entry.id}: ${error.message}`);
