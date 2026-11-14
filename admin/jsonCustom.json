@@ -1,0 +1,20 @@
+{
+  "type": "panel",
+  "items": {
+    "enabled": {
+      "type": "checkbox",
+      "label": "Enabled",
+      "default": false
+    },
+    "changesOnly": {
+      "type": "checkbox",
+      "label": "Log changes only",
+      "default": true
+    },
+    "debounce": {
+      "type": "number",
+      "label": "Debounce (ms)",
+      "default": 0
+    }
+  }
+}
