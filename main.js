@@ -10,7 +10,10 @@ class MongoDBHistory extends utils.Adapter {
         this.client = null;
         this.collection = null;
         this.enabledIds = new Set();
+        this.customs = new Map();
         this.legacyEnabledIds = new Set();
+        this.lastValues = new Map();
+        this.debounceTimers = new Map();
         this.historyConfigLoaded = false;
         this.pendingHistoryObjectChanges = new Map();
         this.on('ready', this.onReady.bind(this));
@@ -95,8 +98,28 @@ class MongoDBHistory extends utils.Adapter {
 
     async onStateChange(id, state) {
         if (!state || !this.collection || !this.enabledIds.has(id)) return;
+        const config = this.customs.get(id) || { enabled: true, changesOnly: true, debounce: 0 };
+        if (config.changesOnly !== false && this.lastValues.has(id) && Object.is(this.lastValues.get(id), state.val)) {
+            return;
+        }
+        const debounce = Number.isFinite(Number(config.debounce)) ? Math.max(0, Number(config.debounce)) : 0;
+        if (debounce > 0) {
+            const oldTimer = this.debounceTimers.get(id);
+            if (oldTimer) this.clearTimeout(oldTimer);
+            this.debounceTimers.set(id, this.setTimeout(() => {
+                this.debounceTimers.delete(id);
+                this.writeState(id, state);
+            }, debounce));
+            return;
+        }
+        await this.writeState(id, state);
+    }
+
+    async writeState(id, state) {
+        if (!this.collection || !this.enabledIds.has(id)) return;
         try {
             await this.collection.insertOne(this.toDocument(id, state));
+            this.lastValues.set(id, state.val);
         } catch (error) {
             this.log.warn(`Could not store history for ${id}: ${error.message}`);
         }
@@ -115,9 +138,14 @@ class MongoDBHistory extends utils.Adapter {
         const custom = obj?.common?.custom?.[this.namespace];
         if (custom?.enabled === true || (custom == null && obj && this.legacyEnabledIds.has(id))) {
             this.enabledIds.add(id);
+            this.customs.set(id, custom || { enabled: true, changesOnly: true, debounce: 0 });
             this.subscribeForeignStates(id);
         } else {
             this.enabledIds.delete(id);
+            this.customs.delete(id);
+            const timer = this.debounceTimers.get(id);
+            if (timer) this.clearTimeout(timer);
+            this.debounceTimers.delete(id);
             this.unsubscribeForeignStates(id);
         }
     }
@@ -126,12 +154,7 @@ class MongoDBHistory extends utils.Adapter {
         this.historyConfigLoaded = false;
         try {
             await this.subscribeForeignObjectsAsync('*');
-            const view = await new Promise((resolve, reject) => {
-                this.getObjectView('system', 'custom', {}, (error, result) => {
-                    if (error) reject(error);
-                    else resolve(result);
-                });
-            });
+            const view = await this.getObjectViewAsync('system', 'custom', {});
             const objectConfig = new Map();
             for (const row of view?.rows || []) {
                 const settings = row.value?.[this.namespace];
@@ -139,22 +162,32 @@ class MongoDBHistory extends utils.Adapter {
             }
 
             const enabled = new Set();
+            const customs = new Map();
             for (const [id, settings] of objectConfig) {
-                if (settings.enabled === true) enabled.add(id);
+                if (settings.enabled === true) {
+                    enabled.add(id);
+                    customs.set(id, settings);
+                }
             }
             for (const id of this.legacyEnabledIds) {
-                if (!objectConfig.has(id)) enabled.add(id);
+                if (!objectConfig.has(id)) {
+                    enabled.add(id);
+                    customs.set(id, { enabled: true, changesOnly: true, debounce: 0 });
+                }
             }
             for (const [id, obj] of this.pendingHistoryObjectChanges) {
                 const settings = obj?.common?.custom?.[this.namespace];
                 if (settings?.enabled === true || (settings == null && obj && this.legacyEnabledIds.has(id))) {
                     enabled.add(id);
+                    customs.set(id, settings || { enabled: true, changesOnly: true, debounce: 0 });
                 } else {
                     enabled.delete(id);
+                    customs.delete(id);
                 }
             }
             this.pendingHistoryObjectChanges.clear();
             this.enabledIds = enabled;
+            this.customs = customs;
             this.historyConfigLoaded = true;
             if (enabled.size) this.subscribeForeignStates([...enabled]);
             this.log.info(`History logging enabled for ${enabled.size} datapoint(s)`);
