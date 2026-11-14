@@ -26,7 +26,7 @@
           "maxRows": 28,
           "validateJson": true,
           "allowEmpty": true,
-          "help": "Enter a MongoDB aggregation pipeline as a JSON array. It runs for each newly stored document. Input fields: _id, id, ts, val, ack, q, from. Keep _id in the output."
+          "help": "Enter a MongoDB aggregation pipeline as a JSON array. It runs for each newly stored document. Input fields: _id, id, ts, val, ack, q, from. Keep _id in the output. Write stages and server-side code operators are blocked."
         },
         "aggregationCollection": {
           "type": "text",
