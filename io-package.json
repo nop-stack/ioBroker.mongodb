@@ -8,6 +8,7 @@
       "de": "MongoDB History"
     },
     "desc": "Stores ioBroker history data in MongoDB",
+    "type": "storage",
     "mode": "daemon",
     "connectionType": "local",
     "dataSource": "push",
@@ -17,7 +18,8 @@
     "messagebox": true,
     "supportCustoms": true,
     "adminUI": {
-      "config": "json"
+      "config": "json",
+      "custom": "json"
     },
     "encryptedNative": ["connectionString"],
     "protectedNative": ["password"],
