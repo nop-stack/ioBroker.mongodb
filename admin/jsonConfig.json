@@ -13,6 +13,28 @@
         },
         "collection": {"type": "text", "label": "Collection", "default": "history"}
       }
+    },
+    "aggregation": {
+      "type": "panel",
+      "label": "Aggregation pipeline",
+      "items": {
+        "aggregationPipeline": {
+          "type": "text",
+          "label": "MongoDB aggregation JSON",
+          "default": "[]",
+          "minRows": 14,
+          "maxRows": 28,
+          "validateJson": true,
+          "allowEmpty": true,
+          "help": "Enter a MongoDB aggregation pipeline as a JSON array. It runs for each newly stored document. Input fields: _id, id, ts, val, ack, q, from. Keep _id in the output."
+        },
+        "aggregationCollection": {
+          "type": "text",
+          "label": "Mapped output collection",
+          "default": "history_mapped",
+          "help": "Transformed documents are written here. The regular history collection keeps the original ioBroker fields for history queries."
+        }
+      }
     }
   }
 }
