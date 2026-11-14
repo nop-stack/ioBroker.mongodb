@@ -9,9 +9,7 @@ class MongoDBHistory extends utils.Adapter {
         super({ ...options, name: 'mongodb' });
         this.client = null;
         this.collection = null;
-        this.enabledIds = new Set();
-        this.customs = new Map();
-        this.legacyEnabledIds = new Set();
+        this.customs = Object.create(null);
         this.lastValues = new Map();
         this.debounceTimers = new Map();
         this.historyConfigLoaded = false;
@@ -24,10 +22,6 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     async onReady() {
-        const ids = Array.isArray(this.config.enabledIds) ? this.config.enabledIds : [];
-        this.legacyEnabledIds = new Set(ids.filter(id => typeof id === 'string' && id.trim()).map(id => id.trim()));
-        this.enabledIds = new Set(this.legacyEnabledIds);
-
         await this.setObjectNotExistsAsync('info', {
             type: 'channel',
             common: { name: 'Information' },
@@ -97,8 +91,9 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     async onStateChange(id, state) {
-        if (!state || !this.collection || !this.enabledIds.has(id)) return;
-        const config = this.customs.get(id) || { enabled: true, changesOnly: true, debounce: 0 };
+        if (!state || !this.collection) return;
+        const config = this.customs[id];
+        if (!config) return;
         if (config.changesOnly !== false && this.lastValues.has(id) && Object.is(this.lastValues.get(id), state.val)) {
             return;
         }
@@ -116,7 +111,7 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     async writeState(id, state) {
-        if (!this.collection || !this.enabledIds.has(id)) return;
+        if (!this.collection || !this.customs[id]) return;
         try {
             await this.collection.insertOne(this.toDocument(id, state));
             this.lastValues.set(id, state.val);
@@ -125,28 +120,32 @@ class MongoDBHistory extends utils.Adapter {
         }
     }
 
-    onObjectChange(id, obj) {
+    async onObjectChange(id, obj) {
         if (!this.collection || typeof id !== 'string') return;
         if (!this.historyConfigLoaded) {
             this.pendingHistoryObjectChanges.set(id, obj);
             return;
         }
-        this.applyHistoryObjectChange(id, obj);
+        try {
+            await this.applyHistoryObjectChange(id, obj);
+        } catch (error) {
+            this.log.warn(`Could not update history subscription for ${id}: ${error.message}`);
+        }
     }
 
-    applyHistoryObjectChange(id, obj) {
+    async applyHistoryObjectChange(id, obj) {
         const custom = obj?.common?.custom?.[this.namespace];
-        if (custom?.enabled === true || (custom == null && obj && this.legacyEnabledIds.has(id))) {
-            this.enabledIds.add(id);
-            this.customs.set(id, custom || { enabled: true, changesOnly: true, debounce: 0 });
-            this.subscribeForeignStates(id);
+        if (custom?.enabled === true) {
+            const alreadyEnabled = Boolean(this.customs[id]);
+            this.customs[id] = custom;
+            if (!alreadyEnabled) await this.subscribeForeignStatesAsync(id);
         } else {
-            this.enabledIds.delete(id);
-            this.customs.delete(id);
+            const wasEnabled = Boolean(this.customs[id]);
+            delete this.customs[id];
             const timer = this.debounceTimers.get(id);
             if (timer) this.clearTimeout(timer);
             this.debounceTimers.delete(id);
-            this.unsubscribeForeignStates(id);
+            if (wasEnabled) this.unsubscribeForeignStates(id);
         }
     }
 
@@ -155,48 +154,33 @@ class MongoDBHistory extends utils.Adapter {
         try {
             await this.subscribeForeignObjectsAsync('*');
             const view = await this.getObjectViewAsync('system', 'custom', {});
-            const objectConfig = new Map();
+            const customs = Object.create(null);
             for (const row of view?.rows || []) {
                 const settings = row.value?.[this.namespace];
-                if (settings && typeof settings === 'object') objectConfig.set(row.id, settings);
-            }
-
-            const enabled = new Set();
-            const customs = new Map();
-            for (const [id, settings] of objectConfig) {
-                if (settings.enabled === true) {
-                    enabled.add(id);
-                    customs.set(id, settings);
-                }
-            }
-            for (const id of this.legacyEnabledIds) {
-                if (!objectConfig.has(id)) {
-                    enabled.add(id);
-                    customs.set(id, { enabled: true, changesOnly: true, debounce: 0 });
-                }
+                if (settings && typeof settings === 'object' && settings.enabled === true) customs[row.id] = settings;
             }
             for (const [id, obj] of this.pendingHistoryObjectChanges) {
                 const settings = obj?.common?.custom?.[this.namespace];
-                if (settings?.enabled === true || (settings == null && obj && this.legacyEnabledIds.has(id))) {
-                    enabled.add(id);
-                    customs.set(id, settings || { enabled: true, changesOnly: true, debounce: 0 });
-                } else {
-                    enabled.delete(id);
-                    customs.delete(id);
-                }
+                if (settings?.enabled === true) customs[id] = settings;
+                else delete customs[id];
             }
             this.pendingHistoryObjectChanges.clear();
-            this.enabledIds = enabled;
             this.customs = customs;
             this.historyConfigLoaded = true;
-            if (enabled.size) this.subscribeForeignStates([...enabled]);
-            this.log.info(`History logging enabled for ${enabled.size} datapoint(s)`);
+            const ids = Object.keys(customs);
+            for (const id of ids) await this.subscribeForeignStatesAsync(id);
+            this.log.info(`History logging enabled for ${ids.length} datapoint(s)`);
         } catch (error) {
             this.historyConfigLoaded = true;
             this.log.warn(`Could not load datapoint history settings: ${error.message}`);
-            for (const [id, obj] of this.pendingHistoryObjectChanges) this.applyHistoryObjectChange(id, obj);
+            for (const [id, obj] of this.pendingHistoryObjectChanges) {
+                try {
+                    await this.applyHistoryObjectChange(id, obj);
+                } catch (subscriptionError) {
+                    this.log.warn(`Could not update history subscription for ${id}: ${subscriptionError.message}`);
+                }
+            }
             this.pendingHistoryObjectChanges.clear();
-            if (this.enabledIds.size) this.subscribeForeignStates([...this.enabledIds]);
         }
     }
 
@@ -373,9 +357,9 @@ class MongoDBHistory extends utils.Adapter {
 
     async getEnabledDatapoints() {
         const result = {};
-        for (const id of this.enabledIds) {
+        for (const id of Object.keys(this.customs)) {
             const obj = await this.getForeignObjectAsync(id);
-            result[id] = obj?.common?.custom?.[this.namespace] || { enabled: true };
+            result[id] = obj?.common?.custom?.[this.namespace] || this.customs[id];
         }
         return result;
     }
