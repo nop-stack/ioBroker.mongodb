@@ -551,6 +551,7 @@ class MongoDBHistory extends utils.Adapter {
         const fields = new Set(['_id', 'id', 'ts', 'val', 'ack', 'q', 'from']);
         // These stages keep the pipeline one-to-one: a source document can produce at most one mapped document.
         const supportedStages = new Set(['$addFields', '$set', '$match', '$project', '$unset']);
+        const forbiddenOperators = new Set(['$out', '$merge', '$function', '$accumulator', '$where']);
         const hasField = path => {
             const fieldPath = String(path);
             return fields.has(fieldPath) || fieldPath.startsWith('val.');
@@ -571,6 +572,10 @@ class MongoDBHistory extends utils.Adapter {
             }
             if (!value || typeof value !== 'object') return;
             for (const [key, entry] of Object.entries(value)) {
+                if (forbiddenOperators.has(key)) {
+                    issues.push(`stage ${stageIndex + 1} uses prohibited operator "${key}"`);
+                    continue;
+                }
                 if (key === '$literal') continue;
                 checkExpression(entry, stageIndex, path ? `${path}.${key}` : key);
             }
@@ -584,6 +589,7 @@ class MongoDBHistory extends utils.Adapter {
             }
             const [operator, specification] = Object.entries(stage)[0];
             if (!operator.startsWith('$')) issues.push(`stage ${index + 1} has invalid operator "${operator}"`);
+            else if (forbiddenOperators.has(operator)) issues.push(`stage ${index + 1} uses prohibited operator "${operator}"`);
             else if (!supportedStages.has(operator)) {
                 issues.push(`stage ${index + 1} uses unsupported operator "${operator}"; mapped pipelines must preserve one output document per input`);
             }
@@ -593,6 +599,10 @@ class MongoDBHistory extends utils.Adapter {
                     if (!query || typeof query !== 'object' || Array.isArray(query)) return;
                     for (const [key, value] of Object.entries(query)) {
                         if (key.startsWith('$')) {
+                            if (forbiddenOperators.has(key)) {
+                                issues.push(`stage ${index + 1} uses prohibited operator "${key}"`);
+                                continue;
+                            }
                             if (key === '$and' || key === '$or' || key === '$nor') checkMatchKeys(value, prefix);
                             else checkExpression(value, index, `${prefix}${key}`);
                             continue;
