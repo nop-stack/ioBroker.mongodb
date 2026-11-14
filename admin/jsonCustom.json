@@ -11,10 +11,30 @@
       "label": "Log changes only",
       "default": true
     },
-    "debounce": {
+    "debounceTime": {
       "type": "number",
-      "label": "Debounce (ms)",
+      "label": "Debounce time (ms)",
       "default": 0
+    },
+    "blockTime": {
+      "type": "number",
+      "label": "Block time (ms)",
+      "default": 0
+    },
+    "changesRelogInterval": {
+      "type": "number",
+      "label": "Relog unchanged value after (seconds)",
+      "default": 0
+    },
+    "changesMinDelta": {
+      "type": "number",
+      "label": "Minimum change from last logged value",
+      "default": 0
+    },
+    "ignoreZero": {
+      "type": "checkbox",
+      "label": "Ignore 0 and null values",
+      "default": false
     }
   }
 }
