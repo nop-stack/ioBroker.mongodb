@@ -6,6 +6,12 @@
       "label": "Enabled",
       "default": false
     },
+    "aliasId": {
+      "type": "text",
+      "label": "Alias ID",
+      "default": "",
+      "help": "Optional ID to use in the mapped MongoDB document instead of the ioBroker datapoint ID."
+    },
     "changesOnly": {
       "type": "checkbox",
       "label": "Log changes only",
