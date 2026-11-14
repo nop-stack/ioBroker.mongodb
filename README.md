@@ -51,7 +51,7 @@ For each accepted history record, MongoDB runs the configured pipeline against t
 ]
 ```
 
-The consistency check is static and covers known source fields and the one-to-one stages `$match`, `$project`, `$set`, `$addFields`, and `$unset`. Stages that can combine or multiply records, such as `$group` and `$unwind`, are rejected so each input history record remains its own output document. MongoDB performs the final expression validation when a document is processed; errors are logged while the original history record remains stored.
+The consistency check is static and covers known source fields and the one-to-one stages `$match`, `$project`, `$set`, `$addFields`, and `$unset`. Stages that can combine or multiply records, such as `$group` and `$unwind`, are rejected so each input history record remains its own output document. Write stages `$out` and `$merge`, and server-side code operators `$function`, `$accumulator`, and `$where`, are explicitly blocked. MongoDB performs the final expression validation when a document is processed; errors are logged while the original history record remains stored.
 
 ## History messages
 
