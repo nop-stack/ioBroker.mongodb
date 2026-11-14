@@ -16,7 +16,7 @@ mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker
 
 For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernames and passwords containing reserved URI characters must be percent-encoded. The connection string is stored encrypted but remains readable in the configuration field.
 
-Enable logging on each datapoint in Admin's object settings under **History** and select this MongoDB instance. The adapter then records its future state changes automatically; it does not import old values from another history adapter.
+Enable logging on each datapoint in Admin's object settings under **History** and select this MongoDB instance. The adapter then records its future state changes automatically; it does not import old values from another history adapter. The datapoint custom settings offer `enabled`, `changesOnly`, and `debounce` options.
 
 The adapter creates a compound `{ id: 1, ts: 1 }` index and stores documents with this shape:
 
