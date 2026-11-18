@@ -10,6 +10,7 @@
     "desc": "Stores ioBroker history data in MongoDB",
     "type": "storage",
     "mode": "daemon",
+    "compact": true,
     "connectionType": "local",
     "dataSource": "push",
     "getHistory": true,
