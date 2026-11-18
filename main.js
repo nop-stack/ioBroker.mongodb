@@ -735,6 +735,8 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     async onUnload(callback) {
+        for (const timer of this.debounceTimers.values()) this.clearTimeout(timer);
+        this.debounceTimers.clear();
         try {
             await this.setStateAsync('info.connection', false, true);
             if (this.client) await this.client.close();
