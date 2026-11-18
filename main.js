@@ -16,6 +16,7 @@ class MongoDBHistory extends utils.Adapter {
         this.debounceTimers = new Map();
         this.lastLoggedAt = new Map();
         this.aggregationPipeline = [];
+        this.aggregationRequested = false;
         this.aggregationCollection = null;
         this.aggregationCollectionIsTimeSeries = false;
         this.aggregationTimeField = null;
@@ -103,8 +104,8 @@ class MongoDBHistory extends utils.Adapter {
                 this.log.info(`Mapped output collection "${this.aggregationCollection}" is a time-series collection (timeField: "${this.aggregationTimeField}")`);
             }
             this.configureAggregationPipeline();
-            if (this.aggregationPipeline.length && !this.supportsDocumentsStage) {
-                this.log.warn(`MongoDB ${buildInfo.version || 'version unknown'} is older than 6.0 or could not be identified; aggregation transformations are disabled because they require the $documents stage`);
+            if (this.aggregationRequested && !this.supportsDocumentsStage) {
+                this.log.warn(`MongoDB ${buildInfo.version || 'version unknown'} is older than 6.0 or could not be identified; aggregation transformations are disabled because they require the $documents stage. Values will not be written to the raw history collection as a fallback`);
                 this.aggregationPipeline = [];
             }
             if (this.aggregationPipeline.length) {
@@ -113,7 +114,7 @@ class MongoDBHistory extends utils.Adapter {
             }
             if (!this.historyCollectionIsTimeSeries) {
                 await this.collection.createIndex({ id: 1, ts: 1 });
-            } else if (!this.aggregationPipeline.length) {
+            } else if (!this.aggregationRequested) {
                 this.log.warn(`Raw history writes are disabled because "${this.collection.collectionName}" is time-series and raw records use a numeric ts; configure a MongoDB 6+ aggregation pipeline and use this as its output collection`);
             }
             await this.setStateAsync('info.connection', true, true);
@@ -182,9 +183,10 @@ class MongoDBHistory extends utils.Adapter {
 
     async writeState(id, state) {
         if (!this.collection || !this.customs[id]) return;
-        if (!this.aggregationPipeline.length && this.historyCollectionIsTimeSeries) return;
+        if (this.aggregationRequested && !this.aggregationPipeline.length) return;
+        if (!this.aggregationRequested && this.historyCollectionIsTimeSeries) return;
         try {
-            if (this.aggregationPipeline.length) {
+            if (this.aggregationRequested) {
                 await this.writeMappedDocument(this.toDocument(id, state), this.customs[id].aliasId);
             } else {
                 await this.collection.insertOne(this.toDocument(id, state));
@@ -471,7 +473,10 @@ class MongoDBHistory extends utils.Adapter {
                 }
                 try {
                     const document = this.toDocument(entry.id, { ...state, ts: Number(state.ts) });
-                    if (this.aggregationPipeline.length) {
+                    if (this.aggregationRequested && !this.aggregationPipeline.length) {
+                        errors.push(`${entry.id}: aggregation pipeline is configured but unavailable; value was not stored`);
+                        continue;
+                    } else if (this.aggregationRequested) {
                         await this.writeMappedDocument(document, this.customs[entry.id]?.aliasId);
                     } else if (this.historyCollectionIsTimeSeries) {
                         errors.push(`${entry.id}: raw history writes require a regular collection; configure a MongoDB 6+ aggregation pipeline to write to a time-series collection`);
@@ -567,8 +572,10 @@ class MongoDBHistory extends utils.Adapter {
 
     configureAggregationPipeline() {
         this.aggregationPipeline = [];
+        this.aggregationRequested = false;
         const source = this.config.aggregationPipeline;
         if (source == null || source === '') return;
+        this.aggregationRequested = true;
         let pipeline;
         try {
             pipeline = typeof source === 'string' ? JSON.parse(source) : source;
@@ -580,6 +587,7 @@ class MongoDBHistory extends utils.Adapter {
             this.log.warn('Aggregation pipeline must be a JSON array of stages');
             return;
         }
+        this.aggregationRequested = pipeline.length > 0;
 
         const issues = this.validateAggregationPipeline(pipeline, this.aggregationTimeField);
         if (issues.length) {
