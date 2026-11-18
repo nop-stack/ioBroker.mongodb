@@ -11,7 +11,12 @@
           "default": "mongodb://127.0.0.1:27017/iobroker",
           "help": "Paste the complete MongoDB URI. Atlas example: mongodb+srv://<username>:<password>@iobroker-data.s8yl5.mongodb.net/iobroker. Encode reserved URI characters in usernames and passwords."
         },
-        "collection": {"type": "text", "label": "Collection", "default": "history"}
+        "collection": {
+          "type": "text",
+          "label": "Raw history collection",
+          "default": "history",
+          "help": "Use a regular collection here. For a time-series output, configure the existing time-series collection under Mapped output collection and enable an aggregation pipeline."
+        }
       }
     },
     "aggregation": {
@@ -26,13 +31,13 @@
           "maxRows": 28,
           "validateJson": true,
           "allowEmpty": true,
-          "help": "Enter a MongoDB aggregation pipeline as a JSON array. It runs for each newly stored document. Input fields: _id, id, ts, val, ack, q, from. The datapoint Alias ID replaces id here; use $id for the alias. Keep _id in the output. Write stages and server-side code operators are blocked."
+          "help": "Requires MongoDB 6.0+. Enter a pipeline as a JSON array; the adapter supplies the input document through $documents. Input fields: _id, id, ts, val, ack, q, from. The datapoint Alias ID replaces id here; use $id for the alias. Keep _id in the output. For a time-series target, output its configured timeField as a BSON Date (for example with $toDate). Transformed events are inserted directly into the output collection; they are not stored in the raw history collection. Write stages and server-side code operators are blocked."
         },
         "aggregationCollection": {
           "type": "text",
           "label": "Mapped output collection",
           "default": "history_mapped",
-          "help": "Transformed documents are written here. The regular history collection keeps the original ioBroker fields for history queries."
+          "help": "Transformed documents are inserted here. With a pipeline enabled, new events are not also written to the raw history collection and are therefore unavailable through getHistory."
         }
       }
     }
