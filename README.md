@@ -18,6 +18,8 @@ For a local server, the default is `mongodb://127.0.0.1:27017/iobroker`. Usernam
 
 Enable logging on each datapoint in Admin's object settings under **History** and select this MongoDB instance. The adapter then records its future state changes automatically; it does not import old values from another history adapter. Per-datapoint settings include `changesOnly`, `debounceTime` (milliseconds), `blockTime` (milliseconds), `changesRelogInterval` (seconds), `changesMinDelta`, and `ignoreZero` (skip `0` and `null`).
 
+Use a regular MongoDB collection for **Raw history collection**. Configure an existing time-series collection under **Mapped output collection** and enable a pipeline when you want transformed measurements written there.
+
 The adapter creates a compound `{ id: 1, ts: 1 }` index and stores documents with this shape:
 
 ```json
@@ -35,7 +37,9 @@ The adapter creates a compound `{ id: 1, ts: 1 }` index and stores documents wit
 
 The **Aggregation pipeline** tab accepts a MongoDB aggregation pipeline as a JSON array. The adapter checks JSON syntax, stage names, and field references against the input fields `_id`, `id`, `ts`, `val`, `ack`, `q`, and `from`. It also checks that `_id` remains available for the mapped output. Pipeline validation messages appear in the adapter log when it starts. A datapoint's optional `aliasId` from its **History** custom settings replaces `id` in the aggregation input; use `$id` to map it into the output. An empty alias leaves the original ioBroker ID in `id`.
 
-For each accepted history record, MongoDB runs the configured pipeline against that record and writes the result to the separate `history_mapped` collection by default. The regular history collection keeps the original ioBroker fields, so `getHistory` continues to work. For example, this maps a record to a time-series document:
+Aggregation transformations require MongoDB 6.0 or later. The adapter checks the server version at startup. On MongoDB versions before 6.0, transformations are disabled and newly logged values use the regular raw `history` collection. On MongoDB 6.0 or later, each event is passed to a database-level aggregation pipeline using an adapter-generated `$documents` first stage. The transformed result is inserted directly into the configured output collection, `history_mapped` by default; no raw staging document is written first. With a pipeline enabled, the adapter's standard `getHistory` and history update/delete commands cannot operate on the arbitrary transformed output schema; they continue to address the raw `history` collection.
+
+The adapter inserts the pipeline result into either a regular or time-series output collection. If the output collection already exists as a time-series collection, the adapter detects its `timeField` and checks that the pipeline outputs that field as a BSON Date. Create the time-series target collection in MongoDB before using it; a missing target is treated as a regular collection. For example, create a time-series collection with `@timestamp` as its time field and `source` as metadata, then use this pipeline:
 
 ```json
 [
@@ -51,7 +55,7 @@ For each accepted history record, MongoDB runs the configured pipeline against t
 ]
 ```
 
-The consistency check is static and covers known source fields and the one-to-one stages `$match`, `$project`, `$set`, `$addFields`, and `$unset`. Stages that can combine or multiply records, such as `$group` and `$unwind`, are rejected so each input history record remains its own output document. Write stages `$out` and `$merge`, and server-side code operators `$function`, `$accumulator`, and `$where`, are explicitly blocked. MongoDB performs the final expression validation when a document is processed; errors are logged while the original history record remains stored.
+The consistency check is static and covers known source fields and the one-to-one stages `$match`, `$project`, `$set`, `$addFields`, and `$unset`. Stages that can combine or multiply records, such as `$group` and `$unwind`, are rejected so each input history record remains its own output document. Write stages `$out` and `$merge`, and server-side code operators `$function`, `$accumulator`, and `$where`, are explicitly blocked in user pipelines. MongoDB performs the final expression validation when a document is processed; errors are logged while the original history record remains stored.
 
 ## History messages
 
