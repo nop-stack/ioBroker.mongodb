@@ -1,20 +1,25 @@
 'use strict';
 
 const utils = require('@iobroker/adapter-core');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const { sendResponse } = require('@iobroker/aggregate');
 
 class MongoDBHistory extends utils.Adapter {
     constructor(options = {}) {
         super({ ...options, name: 'mongodb' });
         this.client = null;
+        this.db = null;
         this.collection = null;
+        this.historyCollectionIsTimeSeries = false;
         this.customs = Object.create(null);
         this.lastValues = new Map();
         this.debounceTimers = new Map();
         this.lastLoggedAt = new Map();
         this.aggregationPipeline = [];
         this.aggregationCollection = null;
+        this.aggregationCollectionIsTimeSeries = false;
+        this.aggregationTimeField = null;
+        this.supportsDocumentsStage = false;
         this.historyConfigLoaded = false;
         this.pendingHistoryObjectChanges = new Map();
         this.on('ready', this.onReady.bind(this));
@@ -42,8 +47,6 @@ class MongoDBHistory extends utils.Adapter {
             native: {}
         });
         await this.setStateAsync('info.connection', false, true);
-        this.configureAggregationPipeline();
-
         try {
             const configuredUri = String(this.config.connectionString || '').trim();
             const host = String(this.config.host || '127.0.0.1').trim();
@@ -72,13 +75,47 @@ class MongoDBHistory extends utils.Adapter {
             this.client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
             await this.client.connect();
             const db = this.client.db(database);
+            this.db = db;
             this.collection = db.collection(this.config.collection || 'history');
             this.aggregationCollection = String(this.config.aggregationCollection || 'history_mapped').trim();
-            if (this.aggregationPipeline.length && this.aggregationCollection === this.collection.collectionName) {
-                this.log.error('Mapped output collection must differ from the history collection; mapped output is disabled');
+            const historyInfo = await db.listCollections({ name: this.collection.collectionName }, { nameOnly: false }).next();
+            this.historyCollectionIsTimeSeries = Boolean(historyInfo?.options?.timeseries);
+            if (this.historyCollectionIsTimeSeries) {
+                this.log.warn(`Configured history collection "${this.collection.collectionName}" is a time-series collection; the adapter will not create its regular { id: 1, ts: 1 } index`);
+            }
+            let buildInfo = {};
+            try {
+                buildInfo = await this.client.db('admin').command({ buildInfo: 1 });
+            } catch (error) {
+                this.log.warn(`Could not determine MongoDB server version; aggregation transformations will be disabled if configured: ${error.message}`);
+            }
+            const versionParts = Array.isArray(buildInfo.versionArray)
+                ? buildInfo.versionArray
+                : String(buildInfo.version || '0.0.0').split('.').map(part => Number.parseInt(part, 10) || 0);
+            this.supportsDocumentsStage = versionParts[0] >= 6;
+            const targetInfo = await db.listCollections({ name: this.aggregationCollection }, { nameOnly: false }).next();
+            const timeSeriesOptions = targetInfo?.options?.timeseries;
+            this.aggregationCollectionIsTimeSeries = Boolean(timeSeriesOptions);
+            this.aggregationTimeField = typeof timeSeriesOptions?.timeField === 'string'
+                ? timeSeriesOptions.timeField
+                : null;
+            if (this.aggregationCollectionIsTimeSeries) {
+                this.log.info(`Mapped output collection "${this.aggregationCollection}" is a time-series collection (timeField: "${this.aggregationTimeField}")`);
+            }
+            this.configureAggregationPipeline();
+            if (this.aggregationPipeline.length && !this.supportsDocumentsStage) {
+                this.log.warn(`MongoDB ${buildInfo.version || 'version unknown'} is older than 6.0 or could not be identified; aggregation transformations are disabled because they require the $documents stage`);
                 this.aggregationPipeline = [];
             }
-            await this.collection.createIndex({ id: 1, ts: 1 });
+            if (this.aggregationPipeline.length) {
+                this.log.info(`Aggregation pipeline enabled on MongoDB ${buildInfo.version || versionParts.join('.')}; incoming documents will be transformed in memory and written directly to "${this.aggregationCollection}"`);
+                this.log.warn(`With the aggregation pipeline enabled, new values are not stored as raw documents in "${this.collection.collectionName}"; getHistory and history update/delete commands cannot operate on the transformed output schema`);
+            }
+            if (!this.historyCollectionIsTimeSeries) {
+                await this.collection.createIndex({ id: 1, ts: 1 });
+            } else if (!this.aggregationPipeline.length) {
+                this.log.warn(`Raw history writes are disabled because "${this.collection.collectionName}" is time-series and raw records use a numeric ts; configure a MongoDB 6+ aggregation pipeline and use this as its output collection`);
+            }
             await this.setStateAsync('info.connection', true, true);
             await this.loadHistoryConfiguration();
             const target = configuredUri ? 'configured connection string' : `${host}:${port}/${database}`;
@@ -93,7 +130,9 @@ class MongoDBHistory extends utils.Adapter {
                     // Ignore cleanup errors while recovering from a failed connection.
                 }
                 this.client = null;
+                this.db = null;
                 this.collection = null;
+                this.historyCollectionIsTimeSeries = false;
             }
             this.setTimeout(() => this.onReady(), 15000);
         }
@@ -143,9 +182,13 @@ class MongoDBHistory extends utils.Adapter {
 
     async writeState(id, state) {
         if (!this.collection || !this.customs[id]) return;
+        if (!this.aggregationPipeline.length && this.historyCollectionIsTimeSeries) return;
         try {
-            const result = await this.collection.insertOne(this.toDocument(id, state));
-            await this.writeMappedDocument(result.insertedId, this.customs[id].aliasId);
+            if (this.aggregationPipeline.length) {
+                await this.writeMappedDocument(this.toDocument(id, state), this.customs[id].aliasId);
+            } else {
+                await this.collection.insertOne(this.toDocument(id, state));
+            }
             this.lastValues.set(id, state.val);
             this.lastLoggedAt.set(id, Date.now());
         } catch (error) {
@@ -228,26 +271,17 @@ class MongoDBHistory extends utils.Adapter {
         };
     }
 
-    async writeMappedDocument(documentId, aliasId) {
-        if (!this.aggregationPipeline.length || !this.collection || !this.aggregationCollection) return;
-        try {
-            const pipeline = [{ $match: { _id: documentId } }];
-            const alias = typeof aliasId === 'string' ? aliasId.trim() : '';
-            if (alias) pipeline.push({ $set: { id: { $literal: alias } } });
-            pipeline.push(
-                ...this.aggregationPipeline,
-                {
-                    $merge: {
-                        into: this.aggregationCollection,
-                        on: '_id',
-                        whenMatched: 'replace',
-                        whenNotMatched: 'insert'
-                    }
-                }
-            );
-            await this.collection.aggregate(pipeline).toArray();
-        } catch (error) {
-            this.log.warn(`Could not write mapped MongoDB document ${documentId}: ${error.message}`);
+    async writeMappedDocument(document, aliasId) {
+        if (!this.aggregationPipeline.length || !this.db || !this.aggregationCollection) return;
+        const sourceDocument = { _id: new ObjectId(), ...document };
+        const pipeline = [{ $documents: [sourceDocument] }];
+        const alias = typeof aliasId === 'string' ? aliasId.trim() : '';
+        if (alias) pipeline.push({ $set: { id: { $literal: alias } } });
+        pipeline.push(...this.aggregationPipeline);
+        const documents = await this.db.aggregate(pipeline).toArray();
+        if (documents.length) {
+            // Insert each mapped event. This works for regular and time-series output collections.
+            await this.db.collection(this.aggregationCollection).insertMany(documents);
         }
     }
 
@@ -436,8 +470,15 @@ class MongoDBHistory extends utils.Adapter {
                     continue;
                 }
                 try {
-                    const result = await this.collection.insertOne(this.toDocument(entry.id, { ...state, ts: Number(state.ts) }));
-                    await this.writeMappedDocument(result.insertedId, this.customs[entry.id]?.aliasId);
+                    const document = this.toDocument(entry.id, { ...state, ts: Number(state.ts) });
+                    if (this.aggregationPipeline.length) {
+                        await this.writeMappedDocument(document, this.customs[entry.id]?.aliasId);
+                    } else if (this.historyCollectionIsTimeSeries) {
+                        errors.push(`${entry.id}: raw history writes require a regular collection; configure a MongoDB 6+ aggregation pipeline to write to a time-series collection`);
+                        continue;
+                    } else {
+                        await this.collection.insertOne(document);
+                    }
                     successCount++;
                 } catch (error) {
                     errors.push(`${entry.id}: ${error.message}`);
@@ -540,7 +581,7 @@ class MongoDBHistory extends utils.Adapter {
             return;
         }
 
-        const issues = this.validateAggregationPipeline(pipeline);
+        const issues = this.validateAggregationPipeline(pipeline, this.aggregationTimeField);
         if (issues.length) {
             for (const issue of issues) this.log.warn(`Aggregation pipeline: ${issue}`);
         } else {
@@ -549,9 +590,14 @@ class MongoDBHistory extends utils.Adapter {
         }
     }
 
-    validateAggregationPipeline(pipeline) {
+    validateAggregationPipeline(pipeline, requiredTimeField = null) {
         const issues = [];
         const fields = new Set(['_id', 'id', 'ts', 'val', 'ack', 'q', 'from']);
+        const dateFields = new Set();
+        const isDateExpression = expression => Boolean(
+            expression && typeof expression === 'object' && !Array.isArray(expression) &&
+            Object.keys(expression).length === 1 && Object.prototype.hasOwnProperty.call(expression, '$toDate')
+        );
         // These stages keep the pipeline one-to-one: a source document can produce at most one mapped document.
         const supportedStages = new Set(['$addFields', '$set', '$match', '$project', '$unset']);
         const forbiddenOperators = new Set(['$out', '$merge', '$function', '$accumulator', '$where']);
@@ -627,6 +673,7 @@ class MongoDBHistory extends utils.Adapter {
 
             if (operator === '$project' && specification && typeof specification === 'object') {
                 const nextFields = new Set();
+                const nextDateFields = new Set();
                 for (const [field, expression] of Object.entries(specification)) {
                     if (field === '_id' && expression !== 1 && expression !== true) {
                         issues.push(`stage ${index + 1} must preserve the original _id with "_id": 1`);
@@ -634,8 +681,10 @@ class MongoDBHistory extends utils.Adapter {
                     if (expression === 1 || expression === true) {
                         if (hasField(field)) nextFields.add(field);
                         else issues.push(`stage ${index + 1} includes unknown field "${field}"`);
+                        if (dateFields.has(field)) nextDateFields.add(field);
                     } else if (expression !== 0 && expression !== false) {
                         nextFields.add(field);
+                        if (isDateExpression(expression)) nextDateFields.add(field);
                     } else if (field === '_id' && expression !== 0 && fields.has('_id')) {
                         nextFields.add('_id');
                     }
@@ -643,11 +692,17 @@ class MongoDBHistory extends utils.Adapter {
                 if (!Object.prototype.hasOwnProperty.call(specification, '_id') || specification._id !== 0) nextFields.add('_id');
                 fields.clear();
                 for (const field of nextFields) fields.add(field);
+                dateFields.clear();
+                for (const field of nextDateFields) dateFields.add(field);
             } else if ((operator === '$set' || operator === '$addFields') && specification && typeof specification === 'object') {
                 if (Object.prototype.hasOwnProperty.call(specification, '_id')) {
                     issues.push(`stage ${index + 1} must not overwrite _id`);
                 }
-                for (const field of Object.keys(specification)) fields.add(field);
+                for (const [field, expression] of Object.entries(specification)) {
+                    fields.add(field);
+                    if (isDateExpression(expression)) dateFields.add(field);
+                    else dateFields.delete(field);
+                }
             } else if (operator === '$unset') {
                 const unsetFields = Array.isArray(specification) ? specification : [specification];
                 if (!unsetFields.every(field => typeof field === 'string')) {
@@ -658,10 +713,16 @@ class MongoDBHistory extends utils.Adapter {
                     if (field === '_id') issues.push(`stage ${index + 1} must not remove _id`);
                     if (!hasField(field)) issues.push(`stage ${index + 1} removes unknown field "${field}"`);
                     fields.delete(field);
+                    dateFields.delete(field);
                 }
             }
         }
         if (!fields.has('_id')) issues.push('pipeline output removes _id; _id is required for mapped documents');
+        if (requiredTimeField && !fields.has(requiredTimeField)) {
+            issues.push(`time-series target requires its timeField "${requiredTimeField}" in the pipeline output`);
+        } else if (requiredTimeField && !dateFields.has(requiredTimeField)) {
+            issues.push(`time-series target requires "${requiredTimeField}" to be a BSON Date; convert it with { "$toDate": ... }`);
+        }
         return [...new Set(issues)];
     }
 
