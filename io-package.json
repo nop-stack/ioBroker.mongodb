@@ -40,6 +40,7 @@
     "collection": "history",
     "aggregationPipeline": "[]",
     "aggregationCollection": "history_mapped",
+    "fileJobs": [],
     "username": "",
     "password": ""
   },

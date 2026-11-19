@@ -57,6 +57,14 @@ The adapter inserts the pipeline result into either a regular or time-series out
 
 The consistency check is static and covers known source fields and the one-to-one stages `$match`, `$project`, `$set`, `$addFields`, and `$unset`. Stages that can combine or multiply records, such as `$group` and `$unwind`, are rejected so each input history record remains its own output document. Write stages `$out` and `$merge`, and server-side code operators `$function`, `$accumulator`, and `$where`, are explicitly blocked in user pipelines. MongoDB performs the final expression validation when a document is processed; errors are logged while the original history record remains stored.
 
+## File jobs
+
+The **Datei-Jobs** tab lets you add independent jobs. Each enabled job has a unique slug name, an absolute file path, a `csv`, `json`, or `jsonl` format, one trigger, its own aggregation pipeline, and a target collection. JSON files may contain one object or an array of objects; JSONL contains one object per non-empty line. CSV uses the first row as field names. The adapter reads files incrementally and processes 750 rows at a time.
+
+Cron triggers accept five fields or six fields with seconds fixed at `0`, so they cannot run more often than once per minute. State triggers support `equals`, `becomesTrue` (only for boolean datapoints), and `change`; `change` waits 60 seconds by default. The datapoint is only a trigger and is not included in the pipeline input. A successful `equals` job can reset its trigger datapoint to `false`.
+
+The adapter streams file rows in batches through an adapter-generated `$documents` stage into a temporary MongoDB collection, then runs the job pipeline once over the complete file. This keeps memory bounded while allowing stages such as `$group` to operate across the entire input; the temporary collection is dropped when the run ends. Pipeline output is written to the job's target collection in batches. With `upsertKey`, every output document must contain all listed fields and is upserted by those values; without it, outputs are inserted. `$out` and `$merge` are rejected. The pipeline dry-run button sends it to MongoDB with an empty `$documents` input. Invalid jobs are disabled and logged without preventing the adapter from starting. Jobs share a single queue, run one at a time, and duplicate triggers for a queued or running job are ignored.
+
 ## History messages
 
 - `getHistory`: reads a datapoint's history using the standard `{id, options}` message format and shared ioBroker aggregation.

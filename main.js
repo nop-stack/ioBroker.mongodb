@@ -3,6 +3,7 @@
 const utils = require('@iobroker/adapter-core');
 const { MongoClient, ObjectId } = require('mongodb');
 const { sendResponse } = require('@iobroker/aggregate');
+const { cronMatches, normalizeJob, readFileRows, validatePipeline } = require('./lib/file-jobs');
 
 class MongoDBHistory extends utils.Adapter {
     constructor(options = {}) {
@@ -23,6 +24,14 @@ class MongoDBHistory extends utils.Adapter {
         this.supportsDocumentsStage = false;
         this.historyConfigLoaded = false;
         this.pendingHistoryObjectChanges = new Map();
+        this.fileJobs = new Map();
+        this.fileJobQueue = [];
+        this.fileJobsInFlight = new Set();
+        this.fileJobDebounceTimers = new Map();
+        this.fileJobLastCronMinute = new Map();
+        this.fileJobLastStateValues = new Map();
+        this.fileJobCronTimer = null;
+        this.fileJobsStopping = false;
         this.on('ready', this.onReady.bind(this));
         this.on('stateChange', this.onStateChange.bind(this));
         this.on('objectChange', this.onObjectChange.bind(this));
@@ -119,6 +128,7 @@ class MongoDBHistory extends utils.Adapter {
             }
             await this.setStateAsync('info.connection', true, true);
             await this.loadHistoryConfiguration();
+            await this.configureFileJobs();
             const target = configuredUri ? 'configured connection string' : `${host}:${port}/${database}`;
             this.log.info(`Connected to MongoDB ${target}`);
         } catch (error) {
@@ -141,6 +151,7 @@ class MongoDBHistory extends utils.Adapter {
 
     async onStateChange(id, state) {
         if (!state || !this.collection) return;
+        await this.handleFileJobStateChange(id, state);
         const config = this.customs[id];
         if (!config) return;
         const debounce = this.getNonNegativeNumber(config.debounceTime ?? config.debounce, 0);
@@ -206,6 +217,7 @@ class MongoDBHistory extends utils.Adapter {
         }
         try {
             await this.applyHistoryObjectChange(id, obj);
+            await this.refreshStateFileJobs(id, obj);
         } catch (error) {
             this.log.warn(`Could not update history subscription for ${id}: ${error.message}`);
         }
@@ -287,6 +299,280 @@ class MongoDBHistory extends utils.Adapter {
         }
     }
 
+    async configureFileJobs() {
+        this.fileJobs.clear();
+        const rows = Array.isArray(this.config.fileJobs) ? this.config.fileJobs.map(row => ({ ...row })) : [];
+        const names = new Set();
+        const nameCounts = new Map();
+        let configChanged = false;
+        for (const row of rows) {
+            if (typeof row?.name === 'string') nameCounts.set(row.name, (nameCounts.get(row.name) || 0) + 1);
+        }
+        for (const row of rows) {
+            if (!row?.enabled) continue;
+            let job;
+            try {
+                job = normalizeJob(row);
+                if (nameCounts.get(job.name) > 1) throw new Error(`duplicate job name "${job.name}"`);
+                if (names.has(job.name)) throw new Error(`duplicate job name "${job.name}"`);
+                names.add(job.name);
+                const stat = await fs.promises.stat(job.file.path);
+                if (!stat.isFile()) throw new Error('file.path does not point to a regular file');
+                if (!this.db || !this.supportsDocumentsStage) throw new Error('file jobs require a connected MongoDB 6.0+ server');
+                await this.db.aggregate([{ $documents: [] }, ...job.pipeline]).toArray();
+                if (job.trigger.type === 'state') await this.validateStateTrigger(job);
+                this.fileJobs.set(job.name, job);
+            } catch (error) {
+                const name = row?.name || '(unnamed)';
+                this.log.warn(`File job "${name}" disabled: ${error.message}`);
+                row.enabled = false;
+                configChanged = true;
+            }
+        }
+        if (configChanged) {
+            this.config.fileJobs = rows;
+            try {
+                await this.extendForeignObjectAsync(`system.adapter.${this.namespace}`, { native: { fileJobs: rows } });
+            } catch (error) {
+                this.log.warn(`Could not save invalid file jobs as disabled: ${error.message}`);
+            }
+        }
+        await this.subscribeFileJobStates();
+        if ([...this.fileJobs.values()].some(job => job.trigger.type === 'cron')) this.scheduleFileJobCronCheck();
+        this.log.info(`File jobs ready: ${this.fileJobs.size} enabled job(s)`);
+    }
+
+    async validateStateTrigger(job) {
+        const object = await this.getForeignObjectAsync(job.trigger.id);
+        if (!object) throw new Error(`state datapoint "${job.trigger.id}" does not exist`);
+        const type = object.common?.type;
+        if (!['string', 'number', 'boolean'].includes(type)) throw new Error(`state datapoint "${job.trigger.id}" has unsupported common.type "${type}"`);
+        if (job.trigger.condition === 'becomesTrue' && type !== 'boolean') {
+            throw new Error('becomesTrue requires a boolean datapoint');
+        }
+        if (job.trigger.condition === 'equals') {
+            let value = job.trigger.value;
+            if (type === 'string') value = String(value);
+            else if (type === 'number') {
+                value = Number(value);
+                if (!Number.isFinite(value)) throw new Error('equals value must be a number for this datapoint');
+            } else if (value === true || value === 'true' || value === 1 || value === '1') value = true;
+            else if (value === false || value === 'false' || value === 0 || value === '0') value = false;
+            else throw new Error('equals value must be true or false for this datapoint');
+            job.trigger.value = value;
+        }
+        return object;
+    }
+
+    async subscribeFileJobStates() {
+        const byId = new Map();
+        for (const job of this.fileJobs.values()) {
+            if (job.trigger.type !== 'state') continue;
+            if (!byId.has(job.trigger.id)) byId.set(job.trigger.id, []);
+            byId.get(job.trigger.id).push(job);
+        }
+        this.fileJobStatesById = byId;
+        for (const id of byId.keys()) {
+            await this.subscribeForeignStatesAsync(id);
+            try {
+                const state = await this.getForeignStateAsync(id);
+                if (state) this.fileJobLastStateValues.set(id, state.val);
+            } catch (error) {
+                this.log.warn(`Could not read initial state for file-job trigger ${id}: ${error.message}`);
+            }
+        }
+    }
+
+    async refreshStateFileJobs(id, object) {
+        if (!this.fileJobStatesById?.has(id)) return;
+        const jobs = this.fileJobStatesById.get(id);
+        for (const job of jobs) {
+            try {
+                await this.validateStateTrigger(job);
+            } catch (error) {
+                this.fileJobs.delete(job.name);
+                this.log.warn(`File job "${job.name}" disabled after trigger object change: ${error.message}`);
+            }
+        }
+        if (object === null) this.fileJobLastStateValues.delete(id);
+    }
+
+    async handleFileJobStateChange(id, state) {
+        if (!state || !this.fileJobStatesById?.has(id)) return;
+        const previous = this.fileJobLastStateValues.get(id);
+        this.fileJobLastStateValues.set(id, state.val);
+        for (const job of this.fileJobStatesById.get(id)) {
+            if (!this.fileJobs.has(job.name)) continue;
+            const trigger = job.trigger;
+            let reason;
+            if (trigger.condition === 'equals' && Object.is(state.val, trigger.value)) {
+                reason = 'state equals';
+            } else if (trigger.condition === 'becomesTrue' && previous === false && state.val === true) {
+                reason = 'state false-to-true';
+            } else if (trigger.condition === 'change' && !Object.is(previous, state.val)) {
+                reason = 'state change';
+            }
+            if (reason && trigger.debounce > 0) {
+                const oldTimer = this.fileJobDebounceTimers.get(job.name);
+                if (oldTimer) this.clearTimeout(oldTimer);
+                const timer = this.setTimeout(() => {
+                    this.fileJobDebounceTimers.delete(job.name);
+                    this.enqueueFileJob(job, reason);
+                }, trigger.debounce);
+                this.fileJobDebounceTimers.set(job.name, timer);
+            } else if (reason) this.enqueueFileJob(job, reason);
+        }
+    }
+
+    scheduleFileJobCronCheck() {
+        if (this.fileJobsStopping || ![...this.fileJobs.values()].some(job => job.trigger.type === 'cron')) return;
+        if (this.fileJobCronTimer) this.clearTimeout(this.fileJobCronTimer);
+        const now = Date.now();
+        const nextMinute = Math.floor(now / 60000) * 60000 + 60000;
+        this.fileJobCronTimer = this.setTimeout(() => {
+            const date = new Date();
+            const minuteKey = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}-${date.getHours()}-${date.getMinutes()}`;
+            for (const job of this.fileJobs.values()) {
+                if (job.trigger.type === 'cron' && cronMatches(job.cron, date) && this.fileJobLastCronMinute.get(job.name) !== minuteKey) {
+                    this.fileJobLastCronMinute.set(job.name, minuteKey);
+                    this.enqueueFileJob(job, 'cron');
+                }
+            }
+            this.scheduleFileJobCronCheck();
+        }, Math.max(25, nextMinute - now + 25));
+    }
+
+    enqueueFileJob(job, reason) {
+        if (this.fileJobsStopping || !this.fileJobs.has(job.name) || this.fileJobsInFlight.has(job.name)) return;
+        this.fileJobsInFlight.add(job.name);
+        this.fileJobQueue.push({ job, reason });
+        if (!this.fileJobQueueRunning) this.fileJobQueuePromise = this.drainFileJobQueue();
+    }
+
+    async drainFileJobQueue() {
+        if (this.fileJobQueueRunning) return;
+        this.fileJobQueueRunning = true;
+        try {
+            while (this.fileJobQueue.length && !this.fileJobsStopping) {
+                const { job, reason } = this.fileJobQueue.shift();
+                try {
+                    if (!this.fileJobs.has(job.name)) continue;
+                    const summary = await this.runFileJob(job);
+                    this.log.info(`File job "${job.name}" completed (${reason}): ${summary.rows} row(s), ${summary.written} document(s) written`);
+                    if (job.trigger.type === 'state' && job.trigger.condition === 'equals' && job.trigger.resetAfterRun) {
+                        await this.setForeignStateAsync(job.trigger.id, false, false);
+                    }
+                } catch (error) {
+                    this.log.error(`File job "${job.name}" failed (${reason}): ${error.message}`);
+                } finally {
+                    this.fileJobsInFlight.delete(job.name);
+                }
+            }
+        } finally {
+            this.fileJobQueueRunning = false;
+        }
+    }
+
+    async runFileJob(job) {
+        const target = this.db.collection(job.target.collection);
+        const batchSize = 750;
+        const runId = new ObjectId().toHexString();
+        const stagingName = `__iobroker_file_job_${runId}`;
+        const originalIdField = `__iobroker_file_job_${runId}_originalId`;
+        const hadOriginalIdField = `__iobroker_file_job_${runId}_hadOriginalId`;
+        const staging = this.db.collection(stagingName);
+        let inputBatch = [];
+        let outputBatch = [];
+        let rows = 0;
+        let written = 0;
+        const flushInput = async () => {
+            if (!inputBatch.length) return;
+            const documents = await this.db.aggregate([{ $documents: inputBatch }]).toArray();
+            if (documents.length) await staging.insertMany(documents, { ordered: false });
+            inputBatch = [];
+        };
+        const flushOutput = async () => {
+            if (!outputBatch.length) return;
+            if (job.target.upsertKey.length) {
+                const operations = outputBatch.map(document => {
+                    const filter = {};
+                    for (const key of job.target.upsertKey) {
+                        const value = this.getDocumentPath(document, key);
+                        if (value === undefined || value === null) throw new Error(`pipeline output is missing upsertKey field "${key}"`);
+                        filter[key] = value;
+                    }
+                    const { _id, ...fields } = document;
+                    const update = { $set: fields };
+                    if (_id !== undefined) update.$setOnInsert = { _id };
+                    return { updateOne: { filter, update, upsert: true } };
+                });
+                const result = await target.bulkWrite(operations, { ordered: false });
+                written += result.upsertedCount + result.modifiedCount;
+            } else {
+                const result = await target.insertMany(outputBatch, { ordered: false });
+                written += result.insertedCount;
+            }
+            outputBatch = [];
+        };
+
+        try {
+            for await (const row of readFileRows(job)) {
+                const sourceHasId = Object.prototype.hasOwnProperty.call(row, '_id');
+                inputBatch.push({
+                    ...row,
+                    _id: new ObjectId(),
+                    [originalIdField]: sourceHasId ? row._id : null,
+                    [hadOriginalIdField]: sourceHasId
+                });
+                rows++;
+                if (inputBatch.length >= batchSize) await flushInput();
+            }
+            await flushInput();
+            if (rows) {
+                const pipeline = [
+                    { $documents: [] },
+                    { $unionWith: stagingName },
+                    { $set: { _id: { $cond: [`$${hadOriginalIdField}`, `$${originalIdField}`, '$_id'] } } },
+                    { $unset: [originalIdField, hadOriginalIdField] },
+                    ...job.pipeline
+                ];
+                const cursor = this.db.aggregate(pipeline, { allowDiskUse: true });
+                for await (const document of cursor) {
+                    outputBatch.push(document);
+                    if (outputBatch.length >= batchSize) await flushOutput();
+                }
+                await flushOutput();
+            }
+        } finally {
+            try { await staging.drop(); } catch (error) {
+                if (error.codeName !== 'NamespaceNotFound' && error.code !== 26) {
+                    this.log.warn(`Could not remove temporary file-job collection ${stagingName}: ${error.message}`);
+                }
+            }
+        }
+        return { rows, written };
+    }
+
+    getDocumentPath(document, path) {
+        return String(path).split('.').reduce((value, key) => value == null ? undefined : value[key], document);
+    }
+
+    async dryRunFileJob(message) {
+        try {
+            const row = (Array.isArray(this.config.fileJobs) ? this.config.fileJobs : [])
+                .find(entry => entry?.name === message.name);
+            let pipeline = message.pipeline ?? row?.pipeline;
+            if (pipeline === undefined) return { success: false, error: `Job not found: ${message.name || '(empty name)'}` };
+            if (typeof pipeline === 'string') pipeline = JSON.parse(pipeline || '[]');
+            validatePipeline(pipeline);
+            if (!this.db || !this.supportsDocumentsStage) throw new Error('File jobs require MongoDB 6.0+ and an active connection');
+            await this.db.aggregate([{ $documents: [] }, ...pipeline]).toArray();
+            return { success: true, message: `Pipeline for "${message.name || row?.name || 'file job'}" is valid` };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    }
+
     async onMessage(obj) {
         if (!obj || !obj.callback) return;
         let result;
@@ -311,6 +597,9 @@ class MongoDBHistory extends utils.Adapter {
                     break;
                 case 'getEnabledDPs':
                     result = await this.getEnabledDatapoints();
+                    break;
+                case 'dryRunFileJob':
+                    result = await this.dryRunFileJob(obj.message || {});
                     break;
                 case 'storeState':
                     result = await this.storeState(obj.message);
@@ -735,9 +1024,15 @@ class MongoDBHistory extends utils.Adapter {
     }
 
     async onUnload(callback) {
+        this.fileJobsStopping = true;
         for (const timer of this.debounceTimers.values()) this.clearTimeout(timer);
         this.debounceTimers.clear();
+        for (const timer of this.fileJobDebounceTimers.values()) this.clearTimeout(timer);
+        this.fileJobDebounceTimers.clear();
+        if (this.fileJobCronTimer) this.clearTimeout(this.fileJobCronTimer);
+        this.fileJobQueue.length = 0;
         try {
+            if (this.fileJobQueuePromise) await this.fileJobQueuePromise;
             await this.setStateAsync('info.connection', false, true);
             if (this.client) await this.client.close();
         } catch (error) {

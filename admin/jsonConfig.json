@@ -40,6 +40,40 @@
           "help": "Transformed documents are inserted here. With a pipeline enabled, new events are not also written to the raw history collection and are therefore unavailable through getHistory."
         }
       }
+    },
+    "fileJobs": {
+      "type": "panel",
+      "label": "Datei-Jobs",
+      "items": {
+        "fileJobs": {
+          "type": "accordion",
+          "attr": "fileJobs",
+          "titleAttr": "name",
+          "items": [
+            { "type": "text", "attr": "name", "label": "Job-Name", "default": "job" },
+            { "type": "checkbox", "attr": "enabled", "label": "Aktiviert", "default": false },
+            { "type": "text", "attr": "path", "label": "Absoluter Dateipfad", "default": "/" },
+            { "type": "select", "attr": "format", "label": "Dateiformat", "default": "csv", "options": [
+              { "label": "CSV", "value": "csv" }, { "label": "JSON-Array", "value": "json" }, { "label": "JSONL", "value": "jsonl" }
+            ] },
+            { "type": "select", "attr": "triggerType", "label": "Trigger", "default": "cron", "options": [
+              { "label": "Cron", "value": "cron" }, { "label": "Datenpunkt", "value": "state" }
+            ] },
+            { "type": "text", "attr": "cronExpr", "label": "Cron-Ausdruck", "default": "0 5 * * *" },
+            { "type": "text", "attr": "stateId", "label": "Trigger-Datenpunkt-ID", "default": "" },
+            { "type": "select", "attr": "condition", "label": "Datenpunkt-Bedingung", "default": "change", "options": [
+              { "label": "equals", "value": "equals" }, { "label": "becomesTrue", "value": "becomesTrue" }, { "label": "change", "value": "change" }
+            ] },
+            { "type": "text", "attr": "value", "label": "Wert für equals", "default": "" },
+            { "type": "number", "attr": "debounce", "label": "Entprellzeit (ms; change leer = 60000)", "min": 0 },
+            { "type": "checkbox", "attr": "resetAfterRun", "label": "Nach erfolgreichem equals-Lauf auf false setzen", "default": false },
+            { "type": "jsonEditor", "attr": "pipeline", "label": "MongoDB Pipeline", "default": "[]", "minRows": 10, "maxRows": 28 },
+            { "type": "text", "attr": "targetCollection", "label": "Ziel-Collection", "default": "" },
+            { "type": "text", "attr": "upsertKey", "label": "Upsert-Schlüssel (kommagetrennt, optional)", "default": "" },
+            { "type": "sendTo", "label": "Pipeline trocken prüfen", "command": "dryRunFileJob", "jsonData": "{\"name\":\"${data.name}\",\"pipeline\":\"${data.pipeline}\"}", "result": { "success": { "en": "Pipeline is valid", "de": "Pipeline ist gültig" } }, "error": { "error": { "en": "Pipeline validation failed", "de": "Pipeline-Prüfung fehlgeschlagen" } } }
+          ]
+        }
+      }
     }
   }
 }
